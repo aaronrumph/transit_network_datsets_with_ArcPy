@@ -35,6 +35,7 @@ class City:
 
         # hard reset override
         if self.hard_reset:
+            self.use_cache = False
             self.streets_reset = True
             self.gdb_reset = True
 
@@ -68,9 +69,11 @@ class City:
                             os.path.exists(nodes_walking_cache_path),
                             os.path.exists(edges_walking_cache_path)])
         # if caches
-        if streets_cache_exists and not self.streets_reset:
+        if streets_cache_exists and self.use_cache and not self.streets_reset:
             logging.info("you already have streets data in your cache_directory, which will be returned to you \n"
                          "if you would like to rewrite this data, please pass reset=True when constructing City object")
+
+# IMPORTANT: need to fix caching, because something weird happens when try to load in either the graphs or gdfs
             all_streets = ox.load_graphml(all_streets_cache_path)
             walking_streets = ox.load_graphml(walking_streets_cache_path)
             nodes_walking = gpd.read_file(nodes_walking_cache_path)
@@ -90,14 +93,16 @@ class City:
             # nodes_all, edges_all = ox.graph_to_gdfs(all_streets, nodes=True, edges=True)
             nodes_walking, edges_walking = ox.graph_to_gdfs(walking_streets, nodes=True,  edges=True)
 
+            (self.all_streets, self.walking_streets, self.nodes_walking,
+             self.edges_walking) = all_streets, walking_streets, nodes_walking, edges_walking
+
         # save to cache
             ox.save_graphml(all_streets, all_streets_cache_path)
             ox.save_graphml(walking_streets, walking_streets_cache_path)
-            nodes_walking.to_file(nodes_walking_cache_path, driver='GeoJSON')
-            edges_walking.to_file(edges_walking_cache_path, driver='GeoJSON')
+            nodes_walking.to_file(nodes_walking_cache_path, driver="GeoJSON")
+            edges_walking.to_file(edges_walking_cache_path, driver="GeoJSON")
 
-            (self.all_streets, self.walking_streets, self.nodes_walking, 
-             self.edges_walking) = all_streets, walking_streets, nodes_walking, edges_walking
+
 
         return all_streets, walking_streets, nodes_walking, edges_walking
 
@@ -127,25 +132,53 @@ class City:
         # creating feature class for edges and nodes
         arcpy.management.CreateFeatureclass(gdb_path,"nodes_walking_fc",
                                             geometry_type="POINT",
-                                            spatial_reference=arcpy.SpatialReference(4326))
+                                            spatial_reference=arcpy.SpatialReference(3857))
         arcpy.management.CreateFeatureclass(gdb_path, "edges_walking_fc",
                                             geometry_type="POLYLINE",
-                                            spatial_reference=arcpy.SpatialReference(4326))
+                                            spatial_reference=arcpy.SpatialReference(3857))
+        for col in self.nodes_walking.columns:
+            if col != "geometry":
+                field_type = "TEXT"
+                if self.nodes_walking[col].dtype in ["int64", "int32"]:
+                    field_type = "LONG"
+                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type)
+                elif self.nodes_walking[col].dtype in ["float64", "float32"]:
+                    field_type = "DOUBLE"
+                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type)
+                else:
+                    field_type = "TEXT"
+                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type, field_length=255)
 
-        # reading all values and indices/columns for both gdfs and then copying all into feature class
-        with arcpy.da.InsertCursor(nodes_walking_fc_path, ["SHAPE@XY"] + list(self.nodes_walking.columns.drop("geometry"))) as cursor:
+        for col in self.edges_walking.columns:
+            if col != "geometry":
+                field_type = "TEXT"
+                if self.edges_walking[col].dtype in ["int64", "int32"]:
+                    field_type = "LONG"
+                    arcpy.management.AddField(edges_walking_fc_path, col, field_type)
+                elif self.edges_walking[col].dtype in ["float64", "float32"]:
+                    field_type = "DOUBLE"
+                    arcpy.management.AddField(edges_walking_fc_path, col, field_type)
+                else:
+                    field_type = "TEXT"
+                    arcpy.management.AddField(edges_walking_fc_path, col, field_type, field_length=255)
+
+        node_fields = ["SHAPE@XY"] + [col for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
+        with arcpy.da.InsertCursor(nodes_walking_fc_path, node_fields) as cursor:
             for idx, row in self.nodes_walking.iterrows():
                 geom = (row.geometry.x, row.geometry.y)
-                values = [geom] + [row[col] for col in self.nodes_walking_fc.columns if col != "geometry"]
+                values = [geom] + [row[col] for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
                 cursor.insertRow(values)
 
-        fields_edges = ["SHAPE@"] + [col for col in self.edges_walking.columns if col != "geometry"]
-        with arcpy.da.InsertCursor(self.edges_walking_fc, fields_edges) as cursor:
-            for idx, row in edges_walking_fc_path.iterrows():
+        edge_fields = ["SHAPE@"] + [col for col in self.edges_walking.columns if col != "geometry"]
+        with arcpy.da.InsertCursor(edges_walking_fc_path, edge_fields) as cursor:
+            for idx, row in self.edges_walking.iterrows():
                 coords = list(row.geometry.coords)
                 array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
-                polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
-                values = [polyline] + [str(row[col]) for col in self.edges_walking.columns if col != "geometry"]
+                polyline = arcpy.Polyline(array, arcpy.SpatialReference(3857))
+                values = [polyline] + [
+                    ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
+                    for col in self.edges_walking.columns if col != "geometry"
+                ]
                 cursor.insertRow(values)
 
         self.nodes_walking_fc, self.edges_walking_fc = nodes_walking_fc_path, edges_walking_fc_path
@@ -156,10 +189,7 @@ class City:
         self.update_streets_data()
         self.setup_gdb()
 
-
-
-
-Berkeley = City("Berkeley, California, USA", hard_reset=False, use_cache=True, gdb_reset=True)
+Berkeley = City("Berkeley, California, USA", hard_reset=True, use_cache=True, gdb_reset=True)
 Berkeley.create_network_dataset()
 
 
