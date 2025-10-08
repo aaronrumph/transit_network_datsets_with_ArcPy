@@ -285,10 +285,10 @@ class City:
         if arcpy.Exists(self.network_dataset_path):
             arcpy.Delete_management(self.network_dataset_path)
         fd_name = f"{self.snake_name}_feature_dataset"
-        arcpy.CreateNetworkDataset_na(
+        arcpy.na.CreateFeatureDataset(
             self.feature_dataset_path,
             "ND",
-            "edges_walking_fc"
+            ["nodes_walking_fc", "edges_walking_fc"], elevation_model="NO_ELEVATION"
         )
 
     def compile_overall(self):
