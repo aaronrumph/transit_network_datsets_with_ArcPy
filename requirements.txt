@@ -4,3 +4,4 @@ osmnx~=2.0.6
 geopandas~=1.0.1
 
 # IMPORTANT: must use python environment provided by Esri/ArcGIS pro
+networkx~=3.3
