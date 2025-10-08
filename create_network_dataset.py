@@ -19,10 +19,14 @@ arc_project_path = config.arc_project_path
 class City:
 
     def __init__(self, name, hard_reset=False, streets_reset=False, use_cache=False, gdb_reset=False):
+        self.feature_dataset_path = None
+        self.edges_walking_fc_path = None
+        self.gdb_path = None
+        self.nodes_walking_fc_path = None
         self.use_cache = use_cache
         self.walking_streets = None
         self.all_streets = None
-        self.gdb_reset = gdb_reset
+        self.gdb_reset = gdb_reset # gdb_reset also resets FD and FC
         self.streets_reset = streets_reset
         self.hard_reset = hard_reset
         self.edges_walking_fc = None
@@ -53,7 +57,9 @@ class City:
         else:
             os.makedirs(self.cache_dir, exist_ok=True)
 
-    # check if streets data already cached, if not, get strets graphs from osmnx
+    # check if streets data already cached, if not, get streets graphs from osmnx
+
+### SPLIT into seperate cache setup and data fetching methods?
     def update_streets_data(self):
         logging.info("Fetching streets data from osmnx or cache")
 
@@ -73,7 +79,7 @@ class City:
             logging.info("you already have streets data in your cache_directory, which will be returned to you \n"
                          "if you would like to rewrite this data, please pass reset=True when constructing City object")
 
-# IMPORTANT: need to fix caching, because something weird happens when try to load in either the graphs or gdfs
+### IMPORTANT: need to fix caching, because something weird happens when try to load in either the graphs or gdfs
             all_streets = ox.load_graphml(all_streets_cache_path)
             walking_streets = ox.load_graphml(walking_streets_cache_path)
             nodes_walking = gpd.read_file(nodes_walking_cache_path)
@@ -102,8 +108,6 @@ class City:
             nodes_walking.to_file(nodes_walking_cache_path, driver="GeoJSON")
             edges_walking.to_file(edges_walking_cache_path, driver="GeoJSON")
 
-
-
         return all_streets, walking_streets, nodes_walking, edges_walking
 
 ### DON'T FORGET: write code to make caches for everything generated in this method
@@ -113,84 +117,101 @@ class City:
         # set up arcgis workspace
         arcpy.env.workspace = arc_project_path
         arcpy.env.overwriteOutput = True
-
-        gdb_path = os.path.join(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
-
-        logging.debug(f"GDB path: {gdb_path}")
-        logging.debug(f"GDB exists: {arcpy.Exists(gdb_path)}")
+        # path
+        self.gdb_path = os.path.join(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
+        logging.debug(f"GDB path: {self.gdb_path}")
+        logging.debug(f"GDB exists: {arcpy.Exists(self.gdb_path)}")
         logging.debug(f"gdb_reset: {self.gdb_reset}")
 
 ### IMPORTANT TO DELETE ONCE CACHING FOR GDB SETUP
-        if arcpy.Exists(gdb_path) and self.gdb_reset:
-            arcpy.Delete_management(gdb_path)
+        if arcpy.Exists(self.gdb_path) and self.gdb_reset:
+            arcpy.Delete_management(self.gdb_path)
         arcpy.management.CreateFileGDB(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
 
+# create feature dataset for nodes and edges to go into (as well as GTFS in future potentially)
+    def create_feature_dataset(self):
+        logging.info("Creating Feature Dataset")
+        # path
+        self.feature_dataset_path = os.path.join(self.gdb_path, f"{self.snake_name}_feature_dataset")
+        # checking in FD already exists and deleting if reset selected
+        if arcpy.Exists(self.feature_dataset_path) and not self.gdb_reset:
+            raise Exception(f"There is already a feature dataset in your geodatabase with name {self.snake_name}_feature_dataset")
+        else:
+            arcpy.Delete_management(self.feature_dataset_path)
+        feature_dataset_name = f"{self.snake_name}_feature_dataset"
+        arcpy.management.CreateFeatureDataset(self.gdb_path, feature_dataset_name, spatial_reference=arcpy.SpatialReference(4326))
+        
+# split here for Feature Dataset and encapsulated fc method
+    def create_feature_classes(self):
+        logging.info("Creating feature classes for edges and nodes")
         # paths for feature classes
-        nodes_walking_fc_path = os.path.join(gdb_path, "nodes_walking_fc")
-        edges_walking_fc_path = os.path.join(gdb_path, "edges_walking_fc")
+        self.nodes_walking_fc_path = os.path.join(self.feature_dataset_path, "nodes_walking_fc")
+        self.edges_walking_fc_path = os.path.join(self.feature_dataset_path, "edges_walking_fc")
 
         # creating feature class for edges and nodes
-        arcpy.management.CreateFeatureclass(gdb_path,"nodes_walking_fc",
+        arcpy.management.CreateFeatureclass(self.feature_dataset_path,"nodes_walking_fc",
                                             geometry_type="POINT",
-                                            spatial_reference=arcpy.SpatialReference(3857))
-        arcpy.management.CreateFeatureclass(gdb_path, "edges_walking_fc",
+                                            spatial_reference=arcpy.SpatialReference(4326))
+        arcpy.management.CreateFeatureclass(self.feature_dataset_path, "edges_walking_fc",
                                             geometry_type="POLYLINE",
-                                            spatial_reference=arcpy.SpatialReference(3857))
+                                            spatial_reference=arcpy.SpatialReference(4326))
         for col in self.nodes_walking.columns:
             if col != "geometry":
                 field_type = "TEXT"
                 if self.nodes_walking[col].dtype in ["int64", "int32"]:
                     field_type = "LONG"
-                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type)
+                    arcpy.management.AddField(self.nodes_walking_fc_path, col, field_type)
                 elif self.nodes_walking[col].dtype in ["float64", "float32"]:
                     field_type = "DOUBLE"
-                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type)
+                    arcpy.management.AddField(self.nodes_walking_fc_path, col, field_type)
                 else:
                     field_type = "TEXT"
-                    arcpy.management.AddField(nodes_walking_fc_path, col, field_type, field_length=255)
+                    arcpy.management.AddField(self.nodes_walking_fc_path, col, field_type, field_length=255)
 
         for col in self.edges_walking.columns:
             if col != "geometry":
                 field_type = "TEXT"
                 if self.edges_walking[col].dtype in ["int64", "int32"]:
                     field_type = "LONG"
-                    arcpy.management.AddField(edges_walking_fc_path, col, field_type)
+                    arcpy.management.AddField(self.edges_walking_fc_path, col, field_type)
                 elif self.edges_walking[col].dtype in ["float64", "float32"]:
                     field_type = "DOUBLE"
-                    arcpy.management.AddField(edges_walking_fc_path, col, field_type)
+                    arcpy.management.AddField(self.edges_walking_fc_path, col, field_type)
                 else:
                     field_type = "TEXT"
-                    arcpy.management.AddField(edges_walking_fc_path, col, field_type, field_length=255)
+                    arcpy.management.AddField(self.edges_walking_fc_path, col, field_type, field_length=255)
 
         node_fields = ["SHAPE@XY"] + [col for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
-        with arcpy.da.InsertCursor(nodes_walking_fc_path, node_fields) as cursor:
+        with arcpy.da.InsertCursor(self.nodes_walking_fc_path, node_fields) as cursor:
             for idx, row in self.nodes_walking.iterrows():
                 geom = (row.geometry.x, row.geometry.y)
                 values = [geom] + [row[col] for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
                 cursor.insertRow(values)
 
         edge_fields = ["SHAPE@"] + [col for col in self.edges_walking.columns if col != "geometry"]
-        with arcpy.da.InsertCursor(edges_walking_fc_path, edge_fields) as cursor:
+        with arcpy.da.InsertCursor(self.edges_walking_fc_path, edge_fields) as cursor:
             for idx, row in self.edges_walking.iterrows():
                 coords = list(row.geometry.coords)
                 array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
-                polyline = arcpy.Polyline(array, arcpy.SpatialReference(3857))
+                polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
                 values = [polyline] + [
                     ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
                     for col in self.edges_walking.columns if col != "geometry"
                 ]
                 cursor.insertRow(values)
+        return self.nodes_walking_fc_path, self.edges_walking_fc_path
 
-        self.nodes_walking_fc, self.edges_walking_fc = nodes_walking_fc_path, edges_walking_fc_path
-        return nodes_walking_fc_path, edges_walking_fc_path
+    def
 
-    def create_network_dataset(self):
+    def compile_overall(self):
         logging.info(f"Now Creating Network Dataset for {self.name}")
         self.update_streets_data()
         self.setup_gdb()
+        self.create_feature_dataset()
+        self.create_feature_classes()
 
 Berkeley = City("Berkeley, California, USA", hard_reset=True, use_cache=True, gdb_reset=True)
-Berkeley.create_network_dataset()
+Berkeley.compile_overall()
 
 
  
