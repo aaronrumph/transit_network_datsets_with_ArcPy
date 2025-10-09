@@ -36,6 +36,7 @@ try:
 
     # using Result arcobject to be able to get info out of process
     result = arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template=config.walk_nd_path, output_feature_dataset=feature_dataset_path)
+    result = arcpy.na.BuildNetwork(in_network_dataset=network_dataset_path)
     logging.info(f"Successfully created network dataset {result}")
 
 # check network analyst back in

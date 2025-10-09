@@ -321,8 +321,8 @@ class City:
         self.create_network_dataset()
         logging.info("Done!")
 
-Kenosha = City("Newport, Kentucky, USA", hard_reset=True, use_cache=False, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
-Kenosha.run_city()
+Clearwater = City("Clearwater, Florida, USA", hard_reset=True, use_cache=False, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Clearwater.run_city()
 
 
  
