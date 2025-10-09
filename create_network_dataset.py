@@ -1,6 +1,10 @@
 import os
+import subprocess
+
 import osmnx as ox
 import arcpy
+
+
 import geopandas as gpd
 import logging
 import config # using a config file to keep paths and whatnot private
@@ -16,19 +20,8 @@ ox.settings.use_cache = True
 
 # ArcGIS project setup stuff
 arc_project_path = config.arc_project_path
-arc_project_file = arcpy.mp.ArcGISProject(r""
-                        r"C:\Users\aaron\localArcGISProjects\network_dataset_package\network_dataset_package.aprx")
-walk_nd_template = config.walk_nd_path
-arc_maps_list = arc_project_file.listMaps()
-# check if any maps, if not, make one
-if arc_maps_list:
-    arc_project_map = arc_maps_list[0]
-    logging.info(f"Map {arc_project_map.name} found")
-else:
-    arc_project_map = arc_project_file.createMap("Map")
-    logging.info("Created new map")
-    arc_project_file.save()
-
+arc_project_file = arcpy.mp.ArcGISProject(os.path.join(arc_project_path, r"network_dataset_package_project.aprx"))
+arcgis_py_env = config.arcgis_py_env
 
 # setting up cache folder so I don't have to keep running the same things over and over again
 
@@ -149,22 +142,28 @@ class City:
     def setup_gdb(self):
         logging.info("Setting up geodatabse where network dataset will go")
 
-        # set up arcgis workspace
         arcpy.env.workspace = arc_project_path
         arcpy.env.overwriteOutput = True
-        # path
+
         self.gdb_path = os.path.join(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
         logging.debug(f"GDB path: {self.gdb_path}")
         logging.debug(f"GDB exists: {arcpy.Exists(self.gdb_path)}")
         logging.debug(f"gdb_reset: {self.gdb_reset}")
 
-### IMPORTANT TO DELETE ONCE CACHING FOR GDB SETUP
         if arcpy.Exists(self.gdb_path) and self.gdb_reset:
             arcpy.Delete_management(self.gdb_path)
+
         arcpy.management.CreateFileGDB(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
         arcpy.env.workspace = self.gdb_path
         arc_project_file.defaultGeodatabase = self.gdb_path
-        arc_project_file.save()
+
+        # trying to see whethere project.save() works or not
+        try:
+            arc_project_file.save()
+            logging.info("Project saved")
+        except OSError as e:
+            logging.warning(f"Could not save project (file may be locked): {e}")
+
 
 # create feature dataset for nodes and edges to go into (as well as GTFS in future potentially)
     def create_feature_dataset(self):
@@ -258,41 +257,62 @@ class City:
                 "!Shape.length@meters! / 85",
                 "PYTHON3")
 
+            with arcpy.da.SearchCursor(self.edges_walking_fc_path, ["SHAPE@"]) as cursor:
+                for row in cursor:
+                    if row[0].isMultipart:
+                        logging.warning("Multi-part geometry detected!")
+                        break
 
-            # add feature classes to current map
-            current_map = arc_project_file.listMaps()[0]
-            current_map.addDataFromPath(self.nodes_walking_fc_path)
-            current_map.addDataFromPath(self.edges_walking_fc_path)
-
+            # Integrate to snap nearby vertices
+            arcpy.management.Integrate(self.edges_walking_fc_path, "0.1 Meters")
             return self.nodes_walking_fc_path, self.edges_walking_fc_path
 
     def create_network_dataset(self):
-        # using the node and edge feature classes to create a new network dataset
-        logging.info("Creating network dataset")
+        # this part has been giving me so so so much grief, but I think I maybe figured it out
+        # this method has to run in ArcGIS pro's python env because for some reason the network analyst\
+        # ttols (maybe just create network dataset?) isn't available in a cloned env
+        logging.info("Creating network dataset using CreateNetworkDataset in ArcGis' python env")
 
-        # activate network analyst extension
+        # make sure that
         if arcpy.CheckExtension("network") == "Available":
             arcpy.CheckOutExtension("network")
             logging.info("Network Analyst extension checked out")
         else:
             raise Exception("Network Analyst extension is not available")
 
-        # path
-        network_dataset_name = "ND"
-        self.network_dataset_path = os.path.join(self.feature_dataset_path, network_dataset_name)
+        try:
+            network_dataset_name = "walking_nd"
+            self.network_dataset_path = os.path.join(self.feature_dataset_path, network_dataset_name)
 
-        # make sure there's no network dataset in the current FD
-        if arcpy.Exists(self.network_dataset_path):
-            arcpy.Delete_management(self.network_dataset_path)
-        fd_name = f"{self.snake_name}_feature_dataset"
-        arcpy.CreateNetworkDataset_na(
-            self.feature_dataset_path,
-            "ND",
-            "edges_walking_fc"
-        )
+            if arcpy.Exists(self.network_dataset_path):
+                arcpy.Delete_management(self.network_dataset_path)
+                logging.info("Deleted existing network dataset")
 
-    def compile_overall(self):
-        logging.info(f"Now Creating Network Dataset for {self.name}")
+            # Create network dataset
+            logging.info("Running arcpy.na.CreateNetworkDataset")
+
+            # path of run_in_arcgispro.py
+            create_nd_script = os.path.join(Path(__file__).parent, "run_in_arcgispro.py")
+
+            result = subprocess.run([arcgis_py_env,create_nd_script,self.name,self.feature_dataset_path,
+                self.nodes_walking_fc_path,self.edges_walking_fc_path], capture_output=True, text=True, timeout=300
+            )
+
+            if result.stdout:
+                logging.info(f"Subprocess output:\n{result.stdout}")
+            if result.returncode == 0:
+                logging.info("successfully ran create_nd_script")
+            else:
+                logging.error(f"Subprocess failed with return code {result.returncode}")
+                logging.error(f"Error output {result.stderr}")
+                raise Exception(f"Network dataset creation failed: {result.stderr}")
+
+        #always gotta check network analyst ext back in
+        finally:
+            arcpy.CheckInExtension("network")
+
+    def run_city(self):
+        logging.info(f"Now Settinh up features for network dataset creation for {self.name}")
         self.update_streets_data()
         self.setup_gdb()
         self.create_feature_dataset()
@@ -300,8 +320,8 @@ class City:
         self.create_network_dataset()
         logging.info("Done!")
 
-Berkeley = City("Berkeley, California, USA", hard_reset=True, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
-Berkeley.compile_overall()
+Kenosha = City("Kenosha, Wisconsin, USA", hard_reset=True, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Kenosha.run_city()
 
 
  
