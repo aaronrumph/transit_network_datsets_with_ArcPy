@@ -5,6 +5,7 @@ import osmnx as ox
 import arcpy
 
 
+
 import geopandas as gpd
 import logging
 import config # using a config file to keep paths and whatnot private
@@ -14,8 +15,8 @@ import networkx as nx
 
 # setup before can run anything else
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
-ox.settings.timeout = 300
-ox.settings.max_query_area_size = 50000000
+ox.settings.timeout = 1000
+ox.settings.max_query_area_size = 500000000
 ox.settings.use_cache = True
 
 # ArcGIS project setup stuff
@@ -289,7 +290,7 @@ class City:
                 logging.info("Deleted existing network dataset")
 
             # Create network dataset
-            logging.info("Running arcpy.na.CreateNetworkDataset")
+            logging.info("Running arcpy.na.CreateNetworkDatasetFromTemplate")
 
             # path of run_in_arcgispro.py
             create_nd_script = os.path.join(Path(__file__).parent, "run_in_arcgispro.py")
@@ -320,7 +321,7 @@ class City:
         self.create_network_dataset()
         logging.info("Done!")
 
-Kenosha = City("Kenosha, Wisconsin, USA", hard_reset=True, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Kenosha = City("Newport, Kentucky, USA", hard_reset=True, use_cache=False, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
 Kenosha.run_city()
 
 

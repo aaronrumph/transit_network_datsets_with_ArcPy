@@ -3,7 +3,7 @@ import sys
 import subprocess
 import logging
 import arcpy
-
+import config
 
 # Using this module to create network dataset in Arcgis' python env
 # because arcpy.na doesn't work in cloned env
@@ -35,9 +35,7 @@ try:
         arcpy.Delete_management(network_dataset_path)
 
     # using Result arcobject to be able to get info out of process
-    result = arcpy.na.CreateNetworkDataset(feature_dataset=feature_dataset_path, out_name=network_dataset_name,
-                                    source_feature_class_names=["nodes_walking_fc",
-                                                                   "edges_walking_fc"],elevation_model="NO_ELEVATION")
+    result = arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template=config.walk_nd_path, output_feature_dataset=feature_dataset_path)
     logging.info(f"Successfully created network dataset {result}")
 
 # check network analyst back in
