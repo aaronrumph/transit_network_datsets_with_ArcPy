@@ -1,3 +1,5 @@
 config.py
 cache/
 berkeley_california_usa_cache/
+troubleshooting.py
+run_in_arcgispro.py

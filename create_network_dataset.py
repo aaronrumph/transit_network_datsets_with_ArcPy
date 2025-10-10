@@ -1,25 +1,31 @@
 import os
-import subprocess
-
-import osmnx as ox
-import arcpy
-
-
-
-import geopandas as gpd
-import logging
-import config # using a config file to keep paths and whatnot private
+import sys
 from pathlib import Path
-import pickle
-import networkx as nx
 
-# setup before can run anything else
+arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
+arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
+os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
+
+# if you want to add modules, MUST (!!!!!!!) come after this block (ensures extensions work in cloned)
+import arcpy
+import arcpy_init
+###################################################################
+
+import subprocess
+import pickle
+import logging
+import osmnx as ox
+import geopandas as gpd
+import networkx as nx
+import config
+
+
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 ox.settings.timeout = 1000
 ox.settings.max_query_area_size = 500000000
 ox.settings.use_cache = True
 
-# ArcGIS project setup stuff
+# ArcGIS project setup
 arc_project_path = config.arc_project_path
 arc_project_file = arcpy.mp.ArcGISProject(os.path.join(arc_project_path, r"network_dataset_package_project.aprx"))
 arcgis_py_env = config.arcgis_py_env
@@ -289,28 +295,26 @@ class City:
                 arcpy.Delete_management(self.network_dataset_path)
                 logging.info("Deleted existing network dataset")
 
-            # Create network dataset
-            logging.info("Running arcpy.na.CreateNetworkDatasetFromTemplate")
+            # current version uses a template I made by hand in Pro to do very simple walking_nd.
+            # Now want to add elevation
+            logging.info("Creating network Dataset from template")
+            arcpy.na.CreateNetworkDatasetFromTemplate(config.walk_nd_path,self.feature_dataset_path)
+            logging.info("Network dataset created successfully")
 
-            # path of run_in_arcgispro.py
-            create_nd_script = os.path.join(Path(__file__).parent, "run_in_arcgispro.py")
 
-            result = subprocess.run([arcgis_py_env,create_nd_script,self.name,self.feature_dataset_path,
-                self.nodes_walking_fc_path,self.edges_walking_fc_path], capture_output=True, text=True, timeout=300
-            )
+            if not arcpy.Exists(self.network_dataset_path):
+                raise Exception(f"Network dataset not found at {self.network_dataset_path}")
 
-            if result.stdout:
-                logging.info(f"Subprocess output:\n{result.stdout}")
-            if result.returncode == 0:
-                logging.info("successfully ran create_nd_script")
-            else:
-                logging.error(f"Subprocess failed with return code {result.returncode}")
-                logging.error(f"Error output {result.stderr}")
-                raise Exception(f"Network dataset creation failed: {result.stderr}")
+            # once nd created, can build
+            logging.info("Building network dataset")
+            arcpy.na.BuildNetwork(self.network_dataset_path)
+            logging.info("Network dataset built successfully!")
 
         #always gotta check network analyst ext back in
         finally:
             arcpy.CheckInExtension("network")
+
+
 
     def run_city(self):
         logging.info(f"Now Settinh up features for network dataset creation for {self.name}")
@@ -321,8 +325,7 @@ class City:
         self.create_network_dataset()
         logging.info("Done!")
 
-Clearwater = City("Clearwater, Florida, USA", hard_reset=True, use_cache=False, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
-Clearwater.run_city()
 
-
- 
+# this is just to test my code
+Albany = City("Albany, California, USA", hard_reset=False, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Albany.run_city()
