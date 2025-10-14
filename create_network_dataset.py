@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 
+
 arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
 arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
 os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
@@ -29,8 +30,6 @@ ox.settings.use_cache = True
 arc_project_path = config.arc_project_path
 arc_project_file = arcpy.mp.ArcGISProject(os.path.join(arc_project_path, r"network_dataset_package_project.aprx"))
 arcgis_py_env = config.arcgis_py_env
-
-# setting up cache folder so I don't have to keep running the same things over and over again
 
 class City:
 
@@ -87,6 +86,7 @@ class City:
 
 ### SPLIT into seperate cache setup and data fetching methods?
 
+# adding elevation support now
 
     def update_streets_data(self):
         logging.info("Fetching streets data from osmnx or cache")
@@ -126,24 +126,27 @@ class City:
 
         else:
             logging.info(f"Creating streets data for {self.name}")
-        # create graphs from osmnx for selected place
-            all_streets = ox.graph_from_place(self.name, network_type="all")
-            walking_streets = ox.graph_from_place(self.name, network_type="walk")
+        # create graphs from osmnx for selected place (WITH ELEVATION NOW???)
+            walking_streets = ox.graph_from_place(self.name, network_type="walk", retain_all=True)
         # turn graphs into 2 gdfs, one for nodes, one for edges
-            # nodes_all, edges_all = ox.graph_to_gdfs(all_streets, nodes=True, edges=True)
+
+                                        # nodes_all, edges_all = ox.graph_to_gdfs(all_streets, nodes=True, edges=True)
+            # removed all_streets for now because don't need all streets and just slower
+
             nodes_walking, edges_walking = ox.graph_to_gdfs(walking_streets, nodes=True,  edges=True)
 
-            cache_dict = {all_streets_cache_path: all_streets, walking_streets_cache_path: walking_streets,
+        #now adding crea
+            cache_dict = {walking_streets_cache_path: walking_streets,
                           nodes_walking_cache_path: nodes_walking, edges_walking_cache_path: edges_walking}
-            (self.all_streets, self.walking_streets, self.nodes_walking,
-             self.edges_walking) = all_streets, walking_streets, nodes_walking, edges_walking
+            (self.walking_streets, self.nodes_walking,
+             self.edges_walking) = walking_streets, nodes_walking, edges_walking
 
         # save to cache
             for file_path in cache_dict:
                 with open(file_path, 'wb') as cache_file:
                     pickle.dump(cache_dict[file_path], cache_file)
 
-        return all_streets, walking_streets, nodes_walking, edges_walking
+        return walking_streets, nodes_walking, edges_walking
 
 ### DON'T FORGET: write code to make caches for everything generated in this method
     def setup_gdb(self):
@@ -152,15 +155,14 @@ class City:
         arcpy.env.workspace = arc_project_path
         arcpy.env.overwriteOutput = True
 
-        self.gdb_path = os.path.join(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
-        logging.debug(f"GDB path: {self.gdb_path}")
-        logging.debug(f"GDB exists: {arcpy.Exists(self.gdb_path)}")
-        logging.debug(f"gdb_reset: {self.gdb_reset}")
+        if self.gdb_reset:
+            # check if gdb exists, if yes delete if gdb_reset true
+            self.gdb_path = os.path.join(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
+            if arcpy.Exists(self.gdb_path) and self.gdb_reset:
+                arcpy.Delete_management(self.gdb_path)
+            arcpy.management.CreateFileGDB(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
 
-        if arcpy.Exists(self.gdb_path) and self.gdb_reset:
-            arcpy.Delete_management(self.gdb_path)
 
-        arcpy.management.CreateFileGDB(arc_project_path, f"{self.snake_name}_network_dataset.gdb")
         arcpy.env.workspace = self.gdb_path
         arc_project_file.defaultGeodatabase = self.gdb_path
 
@@ -298,7 +300,7 @@ class City:
             # current version uses a template I made by hand in Pro to do very simple walking_nd.
             # Now want to add elevation
             logging.info("Creating network Dataset from template")
-            arcpy.na.CreateNetworkDatasetFromTemplate(config.walk_nd_path,self.feature_dataset_path)
+            arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template=config.walk_nd_path, output_feature_dataset=self.feature_dataset_path)
             logging.info("Network dataset created successfully")
 
 
@@ -327,5 +329,5 @@ class City:
 
 
 # this is just to test my code
-Albany = City("Albany, California, USA", hard_reset=False, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Albany = City("Greenbrier, Tennessee, USA", hard_reset=True, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
 Albany.run_city()

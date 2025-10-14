@@ -1,7 +1,7 @@
 # list of requirements to run this code. Highly recommended cloning your arcgispro-py3 (or equivalent) env
-
+#  IMPORTANT!!: must use python environment provided by Esri/ArcGIS pro usually in
+    # "C:\Users\your_user\Program Files\ArcGIS\Pro\bin\Python\envs\arcgispro
 osmnx~=2.0.6
 geopandas~=1.0.1
-
-# IMPORTANT: must use python environment provided by Esri/ArcGIS pro
+numba
 networkx~=3.3
