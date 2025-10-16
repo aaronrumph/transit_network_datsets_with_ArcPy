@@ -265,7 +265,7 @@ class City:
             # creating feature class for edges and nodes
             arcpy.management.CreateFeatureclass(self.feature_dataset_path,"nodes_walking_fc",
                                                 geometry_type="POINT",
-                                                spatial_reference=arcpy.SpatialReference(4326))
+                                                spatial_reference=arcpy.SpatialReference(4326), has_z="ENABLED")
             arcpy.management.CreateFeatureclass(self.feature_dataset_path, "edges_walking_fc",
                                                 geometry_type="POLYLINE",
                                                 spatial_reference=arcpy.SpatialReference(4326))
@@ -284,11 +284,11 @@ class City:
                         field_type = "TEXT"
                         arcpy.management.AddField(self.nodes_walking_fc_path, col, field_type, field_length=255)
 
-            node_fields = ["SHAPE@XY"] + [col for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
+            node_fields = ["SHAPE@XYZ"] + [col for col in self.nodes_walking.columns if col not in ["geometry", "x", "y", "z"]]
             with arcpy.da.InsertCursor(self.nodes_walking_fc_path, node_fields) as cursor:
                 for idx, row in self.nodes_walking.iterrows():
-                    geom = (row.geometry.x, row.geometry.y)
-                    values = [geom] + [row[col] for col in self.nodes_walking.columns if col not in ["geometry", "x", "y"]]
+                    geom = (row.geometry.x, row.geometry.y, row["z"] if "z" in row and row["z"] is not None else 0)
+                    values = [geom] + [row[col] for col in self.nodes_walking.columns if col not in ["geometry", "x", "y", "z"]]
                     cursor.insertRow(values)
 
             # creating edges feature class
@@ -309,7 +309,7 @@ class City:
             with arcpy.da.InsertCursor(self.edges_walking_fc_path, edge_fields) as cursor:
                 for idx, row in self.edges_walking.iterrows():
                     coords = list(row.geometry.coords)
-                    array = arcpy.Array([arcpy.Point(x, y, z) for x, y, z in coords])
+                    array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
                     polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
                     values = [polyline] + [
                         ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
@@ -381,7 +381,7 @@ class City:
 
 
     def run_city(self):
-        logging.info(f"Now Settinh up features for network dataset creation for {self.name}")
+        logging.info(f"Now setting up features for network dataset creation for {self.name}")
         self.update_streets_data()
         self.add_elevation_data()
         self.setup_gdb()
