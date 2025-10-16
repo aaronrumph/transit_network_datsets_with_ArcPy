@@ -2,7 +2,6 @@ import os
 import sys
 from pathlib import Path
 
-
 arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
 arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
 os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
@@ -19,11 +18,12 @@ import osmnx as ox
 import geopandas as gpd
 import networkx as nx
 import config
-
+import time
+import requests
 
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 ox.settings.timeout = 1000
-ox.settings.max_query_area_size = 500000000
+ox.settings.max_query_area_size = 5000000000000
 ox.settings.use_cache = True
 
 # ArcGIS project setup
@@ -34,6 +34,7 @@ arcgis_py_env = config.arcgis_py_env
 class City:
 
     def __init__(self, name, hard_reset=False, streets_reset=False, use_cache=False, gdb_reset=False, fd_reset=False, fc_reset=False, nd_reset=False):
+        self.elevation_cache_path = None
         self.fd_reset = fd_reset
         self.fc_reset = fc_reset
         self.nd_reset = nd_reset
@@ -123,7 +124,6 @@ class City:
              self.edges_walking) = all_streets, walking_streets, nodes_walking, edges_walking
             return all_streets, walking_streets, nodes_walking, edges_walking
 
-
         else:
             logging.info(f"Creating streets data for {self.name}")
         # create graphs from osmnx for selected place (WITH ELEVATION NOW???)
@@ -148,8 +148,61 @@ class City:
 
         return walking_streets, nodes_walking, edges_walking
 
+    # adding elevation field with USGS epqs data
+    def add_elevation_data(self):
+        logging.info("Getting elevation fata from USGS EPQS API")
+
+        # again check whether elevation data already exists
+        self.elevation_cache_path = os.path.join(self.cache_dir, "elevation_data")
+        if os.path.exists(self.elevation_cache_path) and self.use_cache and not self.streets_reset:
+            logging.info("Using existing cached elevation data")
+            with open(self.elevation_cache_path, 'rb') as elevation_cache_file:
+                elevation_dict = pickle.load(elevation_cache_file)
+            # taking z values from cached data and mapping onto nodes gdf
+            if 'z' not in self.nodes_walking.columns:
+                logging.info("Successfully added elevation data ")
+                self.nodes_walking["z"] = self.nodes_walking.index.map(elevation_dict)
+            else:
+                logging.info("Nodes gdf already has z values")
+
+        else:
+            # in case where no elevation cache exists
+            logging.info("Querying USGS EPQS API")
+
+            z_values = []
+            number_of_nodes_total = len(self.nodes_walking)
+            usgs_url = r"https://epqs.nationalmap.gov/v1/json"
+
+            for idx, (node_idx, row) in enumerate(self.nodes_walking.iterrows()):
+                # just logs progress so not staring forever wondering how far along it is
+                if idx % 100 == 0:
+                    logging.info(f" \n Elevation added for {idx}/{number_of_nodes_total} nodes \n")
+
+                parameters_for_usgs_api = {"x": row["x"], "y": row["y"], "units": "Meters", "wkid": 4326}
+
+                try:
+                    response = requests.get(usgs_url, params=parameters_for_usgs_api, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    elevation = data.get('value')
+                    if elevation == -1000000:  # No data available
+                        elevation = None
+                    z_values.append(elevation)
+                except Exception as e:
+                    logging.warning(f"Error getting elevation for node {idx}: {e}")
+                    z_values.append(None)
+
+            self.nodes_walking['z'] = z_values
+            with open(os.path.join(self.cache_dir, "nodes_walking_with_elevation.GeoJSON"), 'wb') as cache_file:
+                pickle.dump(self.nodes_walking, cache_file)
+
+        print(self.nodes_walking.head())
+
+
 ### DON'T FORGET: write code to make caches for everything generated in this method
     def setup_gdb(self):
+        start_time = time.perf_counter()
         logging.info("Setting up geodatabse where network dataset will go")
 
         arcpy.env.workspace = arc_project_path
@@ -173,9 +226,13 @@ class City:
         except OSError as e:
             logging.warning(f"Could not save project (file may be locked): {e}")
 
+        runtime = time.perf_counter() - start_time
+        logging.info(f"Set up geodatabase in {runtime} seconds")
+
 
 # create feature dataset for nodes and edges to go into (as well as GTFS in future potentially)
     def create_feature_dataset(self):
+        start_time = time.perf_counter()
         logging.info("Creating Feature Dataset")
         # path
         self.feature_dataset_path = os.path.join(self.gdb_path, f"{self.snake_name}_feature_dataset")
@@ -188,7 +245,8 @@ class City:
         feature_dataset_name = f"{self.snake_name}_feature_dataset"
         arcpy.management.CreateFeatureDataset(self.gdb_path, feature_dataset_name,
                                               spatial_reference=arcpy.SpatialReference(4326))
-
+        runtime = time.perf_counter() - start_time
+        logging.info(f"Created feature dataset in {runtime} seconds")
 
 # split here for Feature Dataset and encapsulated fc method
     def create_feature_classes(self):
@@ -202,6 +260,7 @@ class City:
             return self.nodes_walking_fc_path, self.edges_walking_fc_path
 
         else:
+            start_time = time.perf_counter()
             logging.info("Creating feature classes")
             # creating feature class for edges and nodes
             arcpy.management.CreateFeatureclass(self.feature_dataset_path,"nodes_walking_fc",
@@ -250,7 +309,7 @@ class City:
             with arcpy.da.InsertCursor(self.edges_walking_fc_path, edge_fields) as cursor:
                 for idx, row in self.edges_walking.iterrows():
                     coords = list(row.geometry.coords)
-                    array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
+                    array = arcpy.Array([arcpy.Point(x, y, z) for x, y, z in coords])
                     polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
                     values = [polyline] + [
                         ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
@@ -274,12 +333,15 @@ class City:
 
             # Integrate to snap nearby vertices
             arcpy.management.Integrate(self.edges_walking_fc_path, "0.1 Meters")
+            runtime = time.perf_counter() - start_time
+            logging.info(f"Created Feature Classes from osmnx nodes and edges in {runtime} seconds")
             return self.nodes_walking_fc_path, self.edges_walking_fc_path
 
     def create_network_dataset(self):
         # this part has been giving me so so so much grief, but I think I maybe figured it out
         # this method has to run in ArcGIS pro's python env because for some reason the network analyst\
         # ttols (maybe just create network dataset?) isn't available in a cloned env
+        start_time = time.perf_counter()
         logging.info("Creating network dataset using CreateNetworkDataset in ArcGis' python env")
 
         # make sure that
@@ -321,13 +383,14 @@ class City:
     def run_city(self):
         logging.info(f"Now Settinh up features for network dataset creation for {self.name}")
         self.update_streets_data()
+        self.add_elevation_data()
         self.setup_gdb()
         self.create_feature_dataset()
         self.create_feature_classes()
-        self.create_network_dataset()
         logging.info("Done!")
 
 
 # this is just to test my code
-Albany = City("Greenbrier, Tennessee, USA", hard_reset=True, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+Albany = City("Kensington, California, USA", hard_reset=False, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
 Albany.run_city()
+
