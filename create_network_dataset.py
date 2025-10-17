@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+from numba.cuda import runtime
+
 arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
 arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
 os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
@@ -20,8 +22,14 @@ import networkx as nx
 import config
 import time
 import requests
+import multiprocessing as mp
+from itertools import repeat
+
 
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 ox.settings.timeout = 1000
 ox.settings.max_query_area_size = 5000000000000
 ox.settings.use_cache = True
@@ -31,9 +39,13 @@ arc_project_path = config.arc_project_path
 arc_project_file = arcpy.mp.ArcGISProject(os.path.join(arc_project_path, r"network_dataset_package_project.aprx"))
 arcgis_py_env = config.arcgis_py_env
 
+
+
+
 class City:
 
     def __init__(self, name, hard_reset=False, streets_reset=False, use_cache=False, gdb_reset=False, fd_reset=False, fc_reset=False, nd_reset=False):
+        self.node_counter = 0
         self.elevation_cache_path = None
         self.fd_reset = fd_reset
         self.fc_reset = fc_reset
@@ -148,12 +160,41 @@ class City:
 
         return walking_streets, nodes_walking, edges_walking
 
+    # writing this as seperate function so that can use multiprocessing
+
+    def get_elevation_for_x_y(self, total_number_of_points, idx, x_y):
+        # just to track process so can tell how many points have been completed yet for query
+        if self.node_counter % 100 == 0:
+            logging.info(f" \n Elevation added for {idx}/{total_number_of_points} nodes \n")
+
+        usgs_url = r"https://epqs.nationalmap.gov/v1/json"
+        lon = x_y[0]
+        lat = x_y[1]
+        parameters_for_usgs_api = {"x": lon, "y": lat, "units": "Meters", "wkid": 4326}
+        try:
+            response = requests.get(usgs_url, params=parameters_for_usgs_api, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            elevation = data.get('value')
+
+            if elevation == -1000000:  # no data available (-1000000 is default for no value)
+                elevation = None
+            self.node_counter += 1
+            return elevation
+        except Exception as e:
+            logging.warning(f"Error getting elevation for node {idx}: {e}")
+            return None
+
     # adding elevation field with USGS epqs data
     def add_elevation_data(self):
+        start_time = time.perf_counter()
+
+
         logging.info("Getting elevation fata from USGS EPQS API")
 
         # again check whether elevation data already exists
-        self.elevation_cache_path = os.path.join(self.cache_dir, "elevation_data")
+        self.elevation_cache_path = os.path.join(self.cache_dir,  f"{self.name}_elevation_dict")
         if os.path.exists(self.elevation_cache_path) and self.use_cache and not self.streets_reset:
             logging.info("Using existing cached elevation data")
             with open(self.elevation_cache_path, 'rb') as elevation_cache_file:
@@ -164,41 +205,40 @@ class City:
                 self.nodes_walking["z"] = self.nodes_walking.index.map(elevation_dict)
             else:
                 logging.info("Nodes gdf already has z values")
+            z_values = self.nodes_walking['z'].tolist()
 
         else:
             # in case where no elevation cache exists
             logging.info("Querying USGS EPQS API")
 
-            z_values = []
+
             number_of_nodes_total = len(self.nodes_walking)
-            usgs_url = r"https://epqs.nationalmap.gov/v1/json"
+            # only useful for tracking progress
+            idx_args_for_elevation = []
+            # tuple of x,y values
+            x_y_args_for_elevation = []
 
+            # making lists of desire arguments so can use .starmap()
             for idx, (node_idx, row) in enumerate(self.nodes_walking.iterrows()):
-                # just logs progress so not staring forever wondering how far along it is
-                if idx % 100 == 0:
-                    logging.info(f" \n Elevation added for {idx}/{number_of_nodes_total} nodes \n")
+                idx_args_for_elevation.append(idx)
+                x_y_pair = (row["x"], row["y"])
+                x_y_args_for_elevation.append(x_y_pair)
 
-                parameters_for_usgs_api = {"x": row["x"], "y": row["y"], "units": "Meters", "wkid": 4326}
-
-                try:
-                    response = requests.get(usgs_url, params=parameters_for_usgs_api, timeout=10)
-                    response.raise_for_status()
-                    data = response.json()
-
-                    elevation = data.get('value')
-                    if elevation == -1000000:  # No data available
-                        elevation = None
-                    z_values.append(elevation)
-                except Exception as e:
-                    logging.warning(f"Error getting elevation for node {idx}: {e}")
-                    z_values.append(None)
+            # using multiprocessing to send as many API requests at once as possible
+            with mp.Pool() as pooled_threads:
+                z_values = pooled_threads.starmap(self.get_elevation_for_x_y,
+                                                  zip(repeat(number_of_nodes_total), idx_args_for_elevation,
+                                                      x_y_args_for_elevation)
+                                                  )
+            pooled_threads.close()
 
             self.nodes_walking['z'] = z_values
-            with open(os.path.join(self.cache_dir, "nodes_walking_with_elevation.GeoJSON"), 'wb') as cache_file:
-                pickle.dump(self.nodes_walking, cache_file)
+            with open(self.elevation_cache_path, 'wb') as cache_file:
+                pickle.dump(self.nodes_walking['z'].to_dict(), cache_file)  # FIXED: save as dict
 
-        print(self.nodes_walking.head())
-
+        runtime = time.perf_counter() - start_time
+        logging.info(f"Got elevation data for {len(self.nodes_walking)} nodes in {runtime} seconds")
+        return z_values
 
 ### DON'T FORGET: write code to make caches for everything generated in this method
     def setup_gdb(self):
@@ -228,7 +268,6 @@ class City:
 
         runtime = time.perf_counter() - start_time
         logging.info(f"Set up geodatabase in {runtime} seconds")
-
 
 # create feature dataset for nodes and edges to go into (as well as GTFS in future potentially)
     def create_feature_dataset(self):
@@ -378,8 +417,6 @@ class City:
         finally:
             arcpy.CheckInExtension("network")
 
-
-
     def run_city(self):
         logging.info(f"Now setting up features for network dataset creation for {self.name}")
         self.update_streets_data()
@@ -391,6 +428,7 @@ class City:
 
 
 # this is just to test my code
-Albany = City("Kensington, California, USA", hard_reset=False, use_cache=True, gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
-Albany.run_city()
-
+if __name__ == "__main__":
+    Albany = City("Richmond, California, USA", hard_reset=True, use_cache=True,
+                  gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
+    Albany.run_city()
