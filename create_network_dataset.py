@@ -165,7 +165,7 @@ class City:
     def get_elevation_for_x_y(self, total_number_of_points, idx, x_y):
         # just to track process so can tell how many points have been completed yet for query
         if self.node_counter % 100 == 0:
-            logging.info(f" \n Elevation added for {idx}/{total_number_of_points} nodes \n")
+            logging.info(f" \n Elevation added for {self.node_counter}/{total_number_of_points} nodes \n")
 
         usgs_url = r"https://epqs.nationalmap.gov/v1/json"
         lon = x_y[0]
@@ -186,7 +186,7 @@ class City:
             logging.warning(f"Error getting elevation for node {idx}: {e}")
             return None
 
-    # adding elevation field with USGS epqs data
+    # adding elevation field with USGS epqs data (can do roughly 7.5 nodes/second with 14 threads)
     def add_elevation_data(self):
         start_time = time.perf_counter()
 
