@@ -264,7 +264,7 @@ class City:
             arc_project_file.save()
             logging.info("Project saved")
         except OSError as e:
-            logging.warning(f"Could not save project (file may be locked): {e}")
+            logging.warning(f"Could not save project (file may be locked or project open): {e}")
 
         runtime = time.perf_counter() - start_time
         logging.info(f"Set up geodatabase in {runtime} seconds")

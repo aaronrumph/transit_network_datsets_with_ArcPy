@@ -26,20 +26,50 @@ import requests
 import multiprocessing as mp
 from itertools import repeat
 
-
+# loggin setup
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+# osmnx setup
 ox.settings.timeout = 1000
 ox.settings.max_query_area_size = 5000000000000
 ox.settings.use_cache = True
 
-# ArcGIS project setup
-arc_project_path = config.arc_project_path
-arc_project_file = arcpy.mp.ArcGISProject(os.path.join(arc_project_path, r"network_dataset_package_project.aprx"))
-arcgis_py_env = config.arcgis_py_env
+# arcgis project template to allow for creating project
+arcgis_project_template = arcpy.mp.ArcGISProject(rf"{Path(__file__).parent}/project_template.aprx")
 
+
+### need to fix arcgproject setup/saving etc. ###
+
+# ArcGIS project setup
+class ArcProject:
+    def __init__(self, name, project_location=Path(__file__).parent, reset=False):
+        self.name = name
+        self.project_location = project_location
+        self.reset = reset
+        self.project_dir_path = os.path.join(self.project_location, self.name)
+        self.path = os.path.join(self.project_dir_path, rf"{self.name}.aprx")
+        self.maps = []
+        self.layouts = []
+        self.project_file = self.path
+        self.arcObject = None
+
+    # method to create project if doesn't already exist, and to activate project
+    def set_up_project(self):
+        if arcpy.Exists(self.path):
+            self.arcObject = arcpy.mp.ArcGISProject(self.path)
+        else:
+            os.makedirs(self.project_dir_path)
+            arcgis_project_template.saveACopy(self.path)
+            self.arcObject = arcpy.mp.ArcGISProject(self.path)
+        # set project as current workspace
+        arcpy.env.workspace = self.project_dir_path
+
+
+
+
+# global functions needed at global level to do multiprocessing for API queries
 def init_worker(counter, lock):
     # initializer function for multiprocess processes, need in order to have a global variable accessible to all workers
     global shared_counter, shared_lock
@@ -158,6 +188,12 @@ class StreetNetwork:
         self.nodes_cache = Cache(self.cache_folder, "nodes_cache")
         self.edges_cache = Cache(self.cache_folder, "edges_cache")
 
+        # place holder for now, but so can access gdfs and graph when passing instance as argument
+        self.network_graph = None
+        self.network_nodes = None
+        self.network_edges = None
+
+
 
     def get_street_network_from_osm(self, timer_on=True):
         # this method does the brunt of the work for the class
@@ -190,6 +226,7 @@ class StreetNetwork:
             logging.info(f"Street network for {self.city_name} had {len(network_nodes)} nodes and "
                          f"{len(network_edges)} edges")
 
+        self.network_graph, self.network_nodes, self.network_edges = network_graph, network_nodes, network_edges
         return network_graph, network_nodes, network_edges
 
 # ElevationMapper class adds elevation to nodes and grades to edges (coming soon?) using USGS EPQS API
@@ -203,13 +240,15 @@ class ElevationMapper:
         self.threads_available = threads_available
         self.reset = reset
         (self.street_network_graph, self.street_network_nodes, self.street_network_edges) = (
-            self.street_network.get_street_network_from_osm()
+            street_network.network_graph, street_network.network_nodes, street_network.network_edges
         )
         self.node_counter = 0
         self.elevation_cache = Cache(street_network.cache_folder, "elevation")
 
     # using multiprocessing to get elevation data if no cache exists
     def add_elevation_data_to_nodes(self):
+        logging.info("Adding elevation to nodes")
+
         # in case no elevation data exists
         if not self.elevation_cache.check_if_cache_already_exists() or self.reset:
             logging.info("Getting elevation data from USGS EPQS API")
@@ -240,36 +279,249 @@ class ElevationMapper:
 
             self.street_network_nodes["z"] = z_values
             self.elevation_cache.write_cache_data(self.street_network_nodes["z"].to_dict())
+            # now updating input StreetNetwork object
+            self.street_network.network_nodes["z"] = self.street_network_nodes
 
             # outputs for method
             run_time = time.perf_counter() - start_time
             logging.info(f"Got elevation data for {len(self.street_network_nodes)} nodes in {run_time} seconds")
             return self.street_network_nodes
+
+        # if elevation data already cached
         else:
+            logging.info("Using cached elevation data")
             z_values = self.elevation_cache.read_cache_data()   # loading elevation data from cache
 
             # check if the nodes gdf already has elevation
             if "z" not in self.street_network_nodes.columns:
                 self.street_network_nodes["z"] = self.street_network_nodes.index.map(z_values)
+                # updating input StreetNetwork objects
+                self.street_network.network_nodes["z"] = self.street_network_nodes.index.map(z_values)
                 logging.info("Successfully added elevation data to nodes from cache")
             else:
                 logging.info("Nodes gdf already has z values")
+            # method output
+            return self.street_network
 
-            return self.street_network_nodes
-
-    # need to calculate grades for edges so can make walking time vary with slope
+    ### need to calculate grades for edges so can make walking time vary with slope ###
     def add_grades_to_edges(self):
         pass
 
-
+### need to review GeoDatabase and ArcProject classes code to make sure no errors
 class GeoDatabase:
-    pass
+    def __init__(self, arcgis_project:ArcProject, street_network:StreetNetwork, reset=True):
+        self.project = arcgis_project
+        self.street_network = street_network
+        self.project_file_path = arcgis_project.path
+        self.reset = reset
+        self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.street_network.snake_name}.gdb")
+
+
+    def set_up_gdb(self):
+        # creates geodatabse if one does not exist, and resets it if reset true
+        if not self.reset:
+            pass
+        
+        elif arcpy.Exists(self.gdb_path):
+            arcpy.Delete_management(self.gdb_path)
+            arcpy.overwriteOutput = True
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+        else:
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+        
+        arcpy.env.workspace = self.gdb_path
+        self.project_file_path.defaultGeodatabase = self.gdb_path
+    
+    def save_gdb(self):
+        # using try to avoid errors in case of file lock
+        try:
+            self.project.arcObject.save()
+            logging.info("Project saved successfully")
+        except OSError as e:
+            logging.warning(f"Could not save project (file may locked or project open: {e}")
+
 
 class FeatureDataset:
-    pass
+    def __init__(self, gdb:GeoDatabase, street_network:StreetNetwork, reset=False):
+        self.gdb = gdb
+        self.street_network = street_network
+        self.reset = reset
+        self.path = os.path.join(self.gdb.gdb_path, f"{self.street_network.snake_name}_feature_dataset")
 
-class FeatureClass:
-    pass
+        # if reset true, then overwrite existing features
+        arcpy.env.overwriteOutput = True
+
+    def create_feature_dataset(self):
+        # check if FD exists, and reset if needed, else create
+        logging.info("Creating feature dataset")
+        if arcpy.Exists(self.path) and not self.reset:
+            pass
+        elif arcpy.Exists(self.path):
+            arcpy.Delete_management(self.path)
+        # creating feature dataset
+        arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.street_network.snake_name,
+                                              spatial_reference=arcpy.SpatialReference(4326)
+        )
+        logging.info("Feature dataset successfully created")
+
+    def reset_feature_dataset(self):
+        # just a method to reset the desired feature dataset
+        if not arcpy.Exists(self.path):
+            raise Exception(f"Cannot delete feature dataset at {self.path} becayse it doesn't exist")
+        else:
+            arcpy.Delete_management(self.path)
+            arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.street_network.snake_name,
+                                              spatial_reference=arcpy.SpatialReference(4326)
+            )
+
+
+class StreetFeatureClasses:
+    # StreetFeatureClasses is nodes and edges for the street network
+    def __init__(self, feature_dataset:FeatureDataset, street_network:StreetNetwork, use_elevation=False, reset=False):
+        self.feature_dataset = feature_dataset
+        self.street_network = street_network
+        self.use_elevation = use_elevation # determines whether to add z values to nodes in feature classes
+        self.reset = reset
+
+        # paths for the two feature classes
+        self.nodes_fc_path = os.path.join(self.feature_dataset.path, "nodes_walking_fc")
+        self.edges_fc_path = os.path.join(self.feature_dataset.path, "edges_walking_fc")
+
+        # useful shorthand to have rather than writing self.street_network.network_nodes etc all the time
+        self.nodes = street_network.network_nodes
+        self.edges = street_network.network_edges
+        
+        # erorr handling for using elevation when creating feature classes for street network
+        if "z" not in self.street_network.network_nodes and self.use_elevation:
+            raise Exception("Cannot use elevation because input StreetNetwork object has no z values")
+
+
+    # method to set up empty feature classes for street network which data can be copied to
+    def create_empty_feature_classes(self):
+        logging.info("Creating empty feature classes for street network")
+        # in case at least one of the two feature classes for street network (nodes or edges) does not exist
+        # or reset desired
+        if (not (arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path))) or self.reset:
+            # possible case here is that one exists but not the other so need to overwrite to be on
+            arcpy.env.overwriteOutput = True
+            # if want to use elevation for network dataset (already checked to make sure data has necessary z values)
+            if self.use_elevation:
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_walking_fc",
+                                    geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326), 
+                                        has_z="ENABLED"
+                )
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_walking_fc",
+                                    geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326)
+                )
+            # not using elevation
+            else:
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_walking_fc",
+                                    geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326)
+                )
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_walking_fc",
+                                    geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326)
+                )
+        # both street FCs exist and reset not desired, so do nothing :)
+        else:
+            logging.info("Existing street network feature classes found and will be used")
+            pass
+
+        # method outputs
+        logging.info("Successfully created empty feature classes")
+        return self.nodes_fc_path, self.edges_fc_path
+
+
+
+### FINISH ADAPTING FOR OOP ###
+
+    # method uses arcpy cursor to add OSM gdfs data to feature classes
+    def add_street_network_data_to_feature_classes(self):
+        start_time = time.perf_counter()
+        logging.info("Mapping street network data to feature classes")
+        # first checking that empty feature classes exist
+        if not (arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path)):
+            raise Exception(f"Cannot add street network data because either "
+                            f"{self.nodes_fc_path} or {self.edges_fc_path} doesn't exist (create empty first)")
+
+        # now mapping data to feature classes for network for non-geometry fields (have to handle geometry seperately)
+        # this section just makes sure each field mapped to feature classes gets the write type
+        for col in self.nodes.columns:
+            # for nodes
+            if col != "geometry":
+                if self.nodes[col].dtype in ["int64", "int32"]:
+                    field_type = "LONG"
+                    arcpy.management.AddField(self.nodes_fc_path, col, field_type)
+                elif self.nodes[col].dtype in ["float64", "float32"]:
+                    field_type = "DOUBLE"
+                    arcpy.management.AddField(self.nodes_fc_path, col, field_type)
+                else:
+                    field_type = "TEXT"
+                    arcpy.management.AddField(self.nodes_fc_path, col, field_type, field_length=255)
+
+        # now mapping non goeometry fields for edges
+        for col in self.edges.columns:
+            if col != "geometry":
+                field_type = "TEXT"
+                if self.edges[col].dtype in ["int64", "int32"]:
+                    field_type = "LONG"
+                    arcpy.management.AddField(self.edges_fc_path, col, field_type)
+                elif self.edges[col].dtype in ["float64", "float32"]:
+                    field_type = "DOUBLE"
+                    arcpy.management.AddField(self.edges_fc_path, col, field_type)
+                else:
+                    field_type = "TEXT"
+                    arcpy.management.AddField(self.edges_fc_path, col, field_type, field_length=255)
+
+
+
+        # ### FIGURE OUT HOW TO HANDLE EDGES ###
+        # if using elevation then need to make xyz points
+        if self.use_elevation:
+            node_fields = ["SHAPE@XYZ"] + [col for col in self.nodes.columns if col not in ["geometry", "x", "y", "z"]]
+            with arcpy.da.InsertCursor(self.nodes_fc_path, node_fields) as cursor:
+                for idx, row in self.nodes.iterrows():
+                    geom = (row.geometry.x, row.geometry.y, row["z"] if "z" in row and row["z"] is not None else 0)
+                    values = [geom] + [row[col] for col in self.nodes.columns if col not in ["geometry", "x", "y", "z"]]
+                    cursor.insertRow(values)
+
+            # creating edges feature classes
+
+            edge_fields = ["SHAPE@"] + [col for col in self.edges.columns if col != "geometry"]
+            with arcpy.da.InsertCursor(self.edges_fc_path, edge_fields) as cursor:
+                for idx, row in self.edges.iterrows():
+                    coords = list(row.geometry.coords)
+                    array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
+                    polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
+                    values = [polyline] + [
+                        ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
+                        for col in self.edges.columns if col != "geometry"
+                    ]
+                    cursor.insertRow(values)
+            # adding fields for network dataset creations
+            logging.info("Adding necessary fields for edges")
+            arcpy.management.AddField(self.edges_fc_path, "walk_time", "DOUBLE")
+            arcpy.management.CalculateField(
+                self.edges_fc_path,
+                "walk_time",
+                "!Shape.length@meters! / 85",
+                "PYTHON3")
+
+            with arcpy.da.SearchCursor(self.edges_fc_path, ["SHAPE@"]) as cursor:
+                for row in cursor:
+                    if row[0].isMultipart:
+                        logging.warning("Multi-part geometry detected!")
+                        break
+
+            # Integrate to snap nearby vertices
+            arcpy.management.Integrate(self.edges_fc_path, "0.1 Meters")
+            runtime = time.perf_counter() - start_time
+            logging.info(f"Created Feature Classes from osmnx nodes and edges in {runtime} seconds")
+            return self.nodes_fc_path, self.edges_fc_path
+
+        else: ### NEED TO ADD CODE FOR WHAT TO DO WITH GEOMETERY FIELDS WHEN ELEVATION NOT ENABLED ###
+            pass
+
+
 
 class NetworkDataset:
     pass
