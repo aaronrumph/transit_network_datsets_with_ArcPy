@@ -165,7 +165,7 @@ class City:
     def get_elevation_for_x_y(self, total_number_of_points, idx, x_y):
         # just to track process so can tell how many points have been completed yet for query
         if self.node_counter % 100 == 0:
-            logging.info(f" \n Elevation added for {self.node_counter}/{total_number_of_points} nodes \n")
+            logging.info(f" \n Elevation added for {idx}/{total_number_of_points} nodes \n")
 
         usgs_url = r"https://epqs.nationalmap.gov/v1/json"
         lon = x_y[0]
@@ -186,7 +186,7 @@ class City:
             logging.warning(f"Error getting elevation for node {idx}: {e}")
             return None
 
-    # adding elevation field with USGS epqs data (can do roughly 7.5 nodes/second with 14 threads)
+    # adding elevation field with USGS epqs data
     def add_elevation_data(self):
         start_time = time.perf_counter()
 
@@ -264,7 +264,7 @@ class City:
             arc_project_file.save()
             logging.info("Project saved")
         except OSError as e:
-            logging.warning(f"Could not save project (file may be locked or project open): {e}")
+            logging.warning(f"Could not save project (file may be locked): {e}")
 
         runtime = time.perf_counter() - start_time
         logging.info(f"Set up geodatabase in {runtime} seconds")
@@ -420,15 +420,15 @@ class City:
     def run_city(self):
         logging.info(f"Now setting up features for network dataset creation for {self.name}")
         self.update_streets_data()
-        self.add_elevation_data()
         self.setup_gdb()
         self.create_feature_dataset()
         self.create_feature_classes()
+        self.create_network_dataset()
         logging.info("Done!")
 
 
 # this is just to test my code
 if __name__ == "__main__":
-    Albany = City("Richmond, California, USA", hard_reset=True, use_cache=True,
+    Albany = City("Berkeley, California, USA", hard_reset=True, use_cache=True,
                   gdb_reset=True, fc_reset=True, fd_reset=True, nd_reset=True)
     Albany.run_city()
