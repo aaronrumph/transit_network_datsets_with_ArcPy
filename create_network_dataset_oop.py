@@ -167,12 +167,9 @@ def create_snake_name(reference_place:dict):
     :return: Snake name for Place
     """
     if "bound_box" in reference_place:  ### FIX THIS SO THAT FILE NAMES NOT TOO LONG ###
-        snake_name = ("_".join(part.strip().lower() for part in reference_place["place_name"].split(",")) +
-                           "_".join(bound_coord for bound_coord in reference_place["bound_box"])
-        )
+        snake_name = ("_".join(bound_coord for bound_coord in reference_place["bound_box"]))
     else:
         snake_name = "_".join(part.strip().lower() for part in reference_place["place_name"].split(","))
-
     return snake_name
 
 
@@ -246,11 +243,11 @@ class StreetNetwork:
         self.bound_box = bound_box  # need to figure out how I want to deal with bounding boxes
 
         if self.bound_box is not None:  ### FIX THIS SO THAT FILE NAMES NOT TOO LONG ###
-            self.snake_name =  (self.type + "_".join(part.strip().lower() for part in self.city_name.split(",")) +
+            self.snake_name =  ("_".join(part.strip().lower() for part in self.city_name.split(",")) +
                                 "_".join(bound_coord for bound_coord in self.bound_box)
             )
         else:
-            self.snake_name =  self.type + "_".join(part.strip().lower() for part in self.city_name.split(","))
+            self.snake_name =  "_".join(part.strip().lower() for part in self.city_name.split(","))
 
         self.cache_folder = CacheFolder(self.snake_name) # cache folder for this street network!
 
@@ -312,7 +309,7 @@ class ElevationMapper:
             1. Adding elevation takes forever, ~130ms per node with 14 threads (1.8s per node per thread!)
                 because the API is so slow
             2. Uses multiprocessing (scary) so use the "if __name__ == __main__" guard!!!!!
-        Attrbitutes:
+        Attributes:
             street_network | StreetNetwork obj, threads_available | int, reset | bool
     """
     def __init__(self, street_network:StreetNetwork, threads_available=mp.cpu_count(), reset=False):
@@ -392,28 +389,35 @@ class ElevationMapper:
 
 ### need to review GeoDatabase and ArcProject classes code to make sure no errors
 class GeoDatabase:
-    def __init__(self, arcgis_project:ArcProject, street_network:StreetNetwork, reset=True):
+    def __init__(self, arcgis_project:ArcProject, street_network:StreetNetwork):
         self.project = arcgis_project
         self.street_network = street_network
         self.project_file_path = arcgis_project.path
-        self.reset = reset
         self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.street_network.snake_name}.gdb")
 
 
-    def set_up_gdb(self):
+    def set_up_gdb(self, reset=False):
         """ Creates geodatabase if one does not exist, and resets it if reset desired."""
-        if not self.reset:
-            pass
+        # making sure not trying to set up gdb before project
+        if not arcpy.Exists(self.project.path):
+            raise FileNotFoundError(f"Cannot set up geodatabase in the the provided project {self.project.name}"
+                                    f"because it doesn't exist")
+
+        if not reset and not arcpy.Exists(self.gdb_path):
+            logging.info("No existing geodatabase found, creating new geodatabase")
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
 
         elif arcpy.Exists(self.gdb_path):
             arcpy.Delete_management(self.gdb_path)
             arcpy.overwriteOutput = True
             arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+
         else:
-            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
-        
+            raise Exception ("Cannot reset geodatabase because it does not exist")
+
+        # modifying current arcpy env
         arcpy.env.workspace = self.gdb_path
-        self.project_file_path.defaultGeodatabase = self.gdb_path
+        self.project.arcObject.defaultGeodatabase = self.gdb_path
     
     def save_gdb(self):
         # using try to avoid errors in case of file lock
@@ -425,13 +429,14 @@ class GeoDatabase:
 
 
 class FeatureDataset:
-    def __init__(self, gdb:GeoDatabase, street_network:StreetNetwork, network_type:str = "walking", reset=False):
+    def __init__(self, gdb:GeoDatabase, street_network:StreetNetwork, network_type:str = "walk", reset=False):
         self.gdb = gdb
         self.street_network = street_network
         self.network_type = network_type
         self.reset = reset
-        self.path = os.path.join(self.gdb.gdb_path, f"{self.street_network.snake_name}_{network_type}_fd")
-        self.name = f"{self.network_type}_{self.street_network.snake_name}"
+        self.name = f"{self.network_type}_fd"
+        self.path = os.path.join(self.gdb.gdb_path, f"{self.name}")
+
 
         # if reset true, then overwrite existing features
         arcpy.env.overwriteOutput = True
@@ -458,7 +463,7 @@ class FeatureDataset:
             raise Exception(f"Cannot delete feature dataset at {self.path} because it doesn't exist")
         else:
             arcpy.Delete_management(self.path)
-            arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.street_network.snake_name,
+            arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.name,
                                               spatial_reference=arcpy.SpatialReference(4326)
             )
 
@@ -472,8 +477,8 @@ class StreetFeatureClasses:
         self.reset = reset
 
         # paths for the two feature classes
-        self.nodes_fc_path = os.path.join(self.feature_dataset.path, "nodes_walking_fc")
-        self.edges_fc_path = os.path.join(self.feature_dataset.path, "edges_walking_fc")
+        self.nodes_fc_path = os.path.join(self.feature_dataset.path, "nodes_fc")
+        self.edges_fc_path = os.path.join(self.feature_dataset.path, "edges_fc")
 
         # useful shorthand to have rather than writing self.street_network.network_nodes etc all the time
         self.nodes = street_network.network_nodes
@@ -495,20 +500,20 @@ class StreetFeatureClasses:
 
             # if want to use elevation for network dataset (already checked to make sure data has necessary z values)
             if self.use_elevation:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_walking_fc",
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc",
                                     geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326), 
                                         has_z="ENABLED"
                 )
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_walking_fc",
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc",
                                     geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326)
                 )
 
             # not using elevation
             else:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_walking_fc",
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc",
                                     geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326)
                 )
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_walking_fc",
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc",
                                     geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326)
                 )
 
@@ -661,8 +666,8 @@ class StreetFeatureClasses:
             "The street feature classes cannot be saved because they have not yet been created"
         
         arcpy.env.overwriteOutput = True
-        arcpy.conversion.FeatureClassToShapefile("nodes_walking_fc", self.street_network.cache_folder.path)
-        arcpy.conversion.FeatureClassToShapefile("edges_walking_fc", self.street_network.cache_folder.path)
+        arcpy.conversion.FeatureClassToShapefile("nodes_fc", self.street_network.cache_folder.path)
+        arcpy.conversion.FeatureClassToShapefile("edges_fc", self.street_network.cache_folder.path)
         logging.info(f"Nodes and edges feature classes succesfully saved as shapefiles in cache folder "
                      f"{self.street_network.cache_folder}")
         arcpy.env.overwriteOutput = False # setting overwrite output back to false so no accidental overwriting
@@ -671,7 +676,7 @@ class NetworkDataset:
     """
     Network dataset class
     """
-    def __init__(self, feature_dataset:FeatureDataset, network_type:str ="walking", use_elevation=False, reset=False):
+    def __init__(self, feature_dataset:FeatureDataset, network_type:str ="walk", use_elevation=False, reset=False):
         self.feature_dataset = feature_dataset
         self.network_type = network_type
         self.use_elevation = use_elevation
@@ -716,28 +721,34 @@ class NetworkDataset:
                 if not self.street_network.elevation_enabled:
                     raise Exception("The street network provided does not have elevation data")
 
-                if self.network_type == "walking":
+                if self.network_type == "walk":
                     raise Exception("Oops, elevation network dataset not supported yet")                                 # write code for creating network datasets using elevation here
                 
-            elif self.network_type == "walking":
+            elif self.network_type == "walk":
                 # check that both nodes and edges feature classes exist in dataset
                 if not arcpy.Exists(self.nodes_fc_path):
                     raise Exception("Nodes feature class does not exist in feature dataset")
                 if not arcpy.Exists(self.edges_fc_path):
                     raise Exception("Edges feature class does not exist in feature dataset")
 
-                arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template="walking_nd_template.xml")
+                arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template="walking_nd_template.xml",
+                                                          output_feature_dataset=self.feature_dataset.path)
                 logging.info("Successfully created walking network dataset from template")
             
             # error handling
             else:
                 raise ValueError("Selected network_type not supported")
-            logging.info(f"Successfully created network dataset in {time.perf_counter() - process_start_time} seconds")
 
-        finally: # have to check extension back in when done running
-            arcpy.CheckInExtension("Network")
+            # mark that has been created
             self.has_been_created = True
+            logging.info(
+                f"Successfully created network dataset in {time.perf_counter() - process_start_time} seconds")
             return self.path
+
+        finally:
+            # have to check extension back in when done running
+            arcpy.CheckInExtension("Network")
+
 
     def build_network_dataset(self, rebuild=False):
         """
@@ -755,23 +766,24 @@ class NetworkDataset:
         if not self.has_been_created:
             raise Exception("The network dataset has not been created yet!")
         arcpy.na.BuildNetwork(self.path)
-        check_network_analyst_extension_back_in()
+
+        # checking extensions out has weird behavior so always need these checks to see that it isn't oddly out/in
+        if network_analyst_extension_checked_out:
+            check_network_analyst_extension_back_in()
         process_run_time = time.perf_counter() - process_start_time
         logging.info(f"Network dataset successfully built in {process_run_time} second")
         return self.path
 
 class Place:
-    def __init__(self, arcgis_project:ArcProject, name, bound_box=None):
+    def __init__(self, arcgis_project:ArcProject, name=None, bound_box=None):
+        if name is None and bound_box is None:
+            raise ValueError("Must provide either a place or bounding box")
+        # parameters
         self.arcgis_project = arcgis_project
         self.name = name
         self.bound_box = bound_box
-        self.street_network_data_exists = False
-        self.elevation_data_exists = False
-        self.gdb_exists = False
-        self.feature_dataset_exists = False
-        self.streets_feature_classes_exists = False
-        self.network_dataset_types = []
-        self.network_datasets_built = {}
+
+        # important attributes not passed
         self.reference_place = ({"place_name": self.name})
         if bound_box is not None:
             self.reference_place["bound_box"] = self.bound_box
@@ -779,9 +791,22 @@ class Place:
         # cache folder for place
         self.cache_folder = CacheFolder(self.snake_name)
 
+        # attributes to check whether certain things exist
+        self.street_network_data_exists = False
+        self.elevation_data_exists = False
+        self.gdb_exists = False
+        self.feature_dataset_exists = False
+        self.streets_feature_classes_exists = False
+        self.network_dataset_types = []
+        self.network_datasets_built = {}
 
+        # set up cache folder when initializing instance if one doesn't already exist
         if not self.cache_folder.check_if_cache_folder_exists():
             self.cache_folder.set_up_cache_folder()
+
+    def reset_place_cache(self):
+        if self.cache_folder.check_if_cache_folder_exists():
+            raise Exception(f"Cannot reset cache folder for place {self.snake_name}")
 
     def get_street_network_data_from_place(self, network_type, use_elevation=False):
         pass
@@ -801,30 +826,45 @@ class Place:
     def check_if_streets_feature_classes_exists(self):
         pass
     
-    def create_network_dataset_from_place(self, network_type, use_elevation):                                             # still need to figure out what to do with bounding box rather than place
+    def create_network_dataset_from_place(self, network_type="walk", use_elevation=False):                                             # still need to figure out what to do with bounding box rather than place
         # create StreetNetwork object for this place
         street_network_for_place = StreetNetwork(self.name, network_type=network_type)
         street_network_for_place.get_street_network_from_osm()
 
+        # elevation handling
         if use_elevation:
             elevation_mapper_for_place = ElevationMapper(street_network_for_place)
             elevation_mapper_for_place.add_elevation_data_to_nodes()
             elevation_mapper_for_place.add_grades_to_edges()
             logging.warning("Elevation data added for nodes, but cannot create network dataset with elevation yet")
 
+        # prepare geodatabase and create feature dataset
         geodatabase_for_place = GeoDatabase(self.arcgis_project, street_network=street_network_for_place)
-        feature_dataset_for_place = FeatureDataset(geodatabase_for_place, street_network_for_place)
+        geodatabase_for_place.set_up_gdb(reset=False)
+        feature_dataset_for_place = FeatureDataset(geodatabase_for_place, street_network_for_place, "walk")
+        feature_dataset_for_place.create_feature_dataset()
+
+        # take street network map to feature classes
+        street_feature_classes_for_place = StreetFeatureClasses(feature_dataset_for_place, street_network_for_place)
+        street_feature_classes_for_place.create_empty_feature_classes()
+        street_feature_classes_for_place.add_street_network_data_to_feature_classes()
+        street_feature_classes_for_place.save_street_feature_classes_to_shapefile()
+
+        # create and build network dataset from streets feature classes
+        network_dataset_for_place = NetworkDataset(feature_dataset_for_place)
+        network_dataset_for_place.create_network_dataset()
+        network_dataset_for_place.build_network_dataset()
 
 
-        
 
 if network_analyst_extension_checked_out:
     check_network_analyst_extension_back_in()
 # # # # # # # # # # # # # # # # # # Testing Area :::: DO NOT REMOVE "if __name__ ..." # # # # # # # # # # # # # # # # #
 
 if __name__ == "__main__":
-    pinole_street_network = StreetNetwork("El Sobrante, California, USA")
-    pinole_street_network_with_elevation = ElevationMapper(pinole_street_network, reset=True)
-    print(pinole_street_network_with_elevation.add_elevation_data_to_nodes().head())
+    arc_package_project = ArcProject("network_dataset_package_project")
+    arc_package_project.set_up_project()
+    el_sobrante = Place(arc_package_project, "Zion, Illinois, USA")
+    el_sobrante.create_network_dataset_from_place(network_type="walk")
 
 
