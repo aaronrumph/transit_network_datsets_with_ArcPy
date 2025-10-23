@@ -1,7 +1,3 @@
-# Currently in process of rewriting my code to use classes to make my code more readable
-# Going to add docstrings for every class, method, and function so that can actually publish as package
-# and have be understandable. Also adding better exception handling.
-
 import os
 import sys
 from pathlib import Path
@@ -30,6 +26,9 @@ import multiprocessing as mp         # used for querying in bulk
 from itertools import repeat
 import re
 import platform
+
+# local module(s)
+import gtfs_data
 
 # making sure that using windows because otherwise cannot use arcpy and ArcGIS
 if platform.system() != "Windows":
@@ -140,8 +139,8 @@ def check_out_network_analyst_extension():
     :return: True - successful, exception if False
     """
     # need to check that network analyst extension is actually available to use, and then check it out
-    if arcpy.CheckExtension("network") == "Available":
-        arcpy.CheckOutExtension("network")
+    if arcpy.CheckExtension("Network") == "Available":
+        arcpy.CheckOutExtension("Network")
         logging.info("Network Analyst extension checked out")
         return True
     else:
@@ -270,7 +269,12 @@ class StreetNetwork:
 
 
     def get_street_network_from_osm(self, timer_on=True):
-        # this method does the brunt of the work for the class
+        """
+        Main function for class that gets street network edges and nodes, either from cache, if cache exists, or from
+        OpenStreetMaps (through osmnx)
+        :param timer_on: logs run time for method if
+        :return: street network graph, and the nodes and egdes that make up the graph in geodataframes
+        """
         process_start_time = time.perf_counter()
         logging.info("Getting street network")
 
@@ -555,7 +559,7 @@ class StreetFeatureClasses:
                     field_type = "TEXT"
                     arcpy.management.AddField(self.nodes_fc_path, col, field_type, field_length=255)
 
-        # now mapping non goeometry fields for edges
+        # now mapping non geometry fields for edges
         for col in self.edges.columns:
             if col != "geometry":
                 field_type = "TEXT"
@@ -671,6 +675,50 @@ class StreetFeatureClasses:
         logging.info(f"Nodes and edges feature classes succesfully saved as shapefiles in cache folder "
                      f"{self.street_network.cache_folder}")
         arcpy.env.overwriteOutput = False # setting overwrite output back to false so no accidental overwriting
+
+# here using parent class for each GTFS thing that ArcGIS needs so more readable and can better specify methods later
+
+
+
+
+class TransitNetwork:
+    def __init__(self, place_name: str = None, bound_box: list = None, modes: list = None):
+        """
+        Transit network class for place
+        :param place_name: str | name of the place
+        :param modes: list | modes to be included in the transit network {"all", "bus", "heavy_rail", "light_rail",
+        "regional_rail", "ferry", "gondola", "funicular", "trolleybus", "monorail"} (see GTFS route_types)
+
+        **Methods:**
+            get_transit_agencies_for_place: creates a list of transit agencies that serve place (see method doc)
+
+
+        """
+        self.place_name = place_name
+        self.bound_box = bound_box
+
+        self.transit_agencies = []
+        self.modes = modes
+
+    def get_transit_agencies_for_place(self, geographic_scope: str, mode):
+        """
+
+        :param geographic_scope: what geographic scope to get transit agencies for. If using place name rather than
+        bounding box: {"place", "adjacent" (place plus all immediately adjacent places),
+        :param "network_extent" (specified
+        place plus all places served by any transit agency that also serves specified place) "msa", "csa"}
+        :return:
+        """
+        pass
+
+    def get_gtfs_data(self, list_of_agencies):
+        pass
+
+    def create_transit_feature_classes(self):
+        pass
+
+    def connect_network_to_streets(self):
+        pass
 
 class NetworkDataset:
     """

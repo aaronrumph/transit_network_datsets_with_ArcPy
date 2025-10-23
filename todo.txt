@@ -1,0 +1,6 @@
+# TODO: add transit network support in create_network_dataset... method in Place Class
+# TODO: add docstrings for every class, method, and function so that can actually publish as package
+    # and have be understandable. Also adding better exception handling.
+# TODO: add methods needed for specific analysis
+# TODO: ridership forcasting code
+# TODO GTFS modification code
