@@ -1,7 +1,6 @@
 """
 This module is used to define the network types and their attributes used for creation of network dataset
 """
-
 import os
 from pathlib import Path
 

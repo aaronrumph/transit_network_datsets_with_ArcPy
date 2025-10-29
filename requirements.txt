@@ -3,5 +3,13 @@
     # "C:\Users\your_user\Program Files\ArcGIS\Pro\bin\Python\envs\arcgispro
 osmnx~=2.0.6
 geopandas~=1.0.1
-numba
+numba~=0.62.1
 networkx~=3.3
+requests~=2.32.5
+dotenv~=0.9.9
+python-dotenv~=1.2.1
+arcgis~=2.4.0.1
+
+
+# other requirements:
+# transit_land_api_key

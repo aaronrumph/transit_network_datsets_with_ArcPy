@@ -1,6 +1,15 @@
+# TODO: fix edge grades fields and walk time against vs along
+
 # TODO: add transit network support in create_network_dataset... method in Place Class
 # TODO: add docstrings for every class, method, and function so that can actually publish as package
     # and have be understandable. Also adding better exception handling.
 # TODO: add methods needed for specific analysis
 # TODO: ridership forcasting code
 # TODO GTFS modification code
+
+# TODO multiprocessing for mapping street network data to feature classes because that is current largest bottleneck
+    outside of getting elevation data
+
+# TODO fix create_snake_name to be consistent accross modules (currently create_snake_name in
+    create_network_dataset_oop.py shadows same func in general_tools.py)
+

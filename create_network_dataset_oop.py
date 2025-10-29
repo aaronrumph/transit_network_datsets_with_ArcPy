@@ -4,7 +4,6 @@ from pathlib import Path
 
 from arcgis import features
 
-import network_types
 
 # Setting up python environment/making sure env points to extensions correctly
 arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
@@ -21,7 +20,6 @@ import logging
 import osmnx as ox                   # used for getting streets data
 import geopandas as gpd
 import networkx as nx
-import config
 import time                          # used for checking runtimes of functions/methods
 import requests                      # used for USGS API querying
 import multiprocessing as mp         # used for querying in bulk
@@ -30,7 +28,8 @@ import re
 import platform
 
 # local module(s)
-import gtfs_data
+import transit_data_for_arcgis
+import network_types
 
 # making sure that using windows because otherwise cannot use arcpy and ArcGIS
 if platform.system() != "Windows":
@@ -593,12 +592,13 @@ class GeoDatabase:
             arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
 
         else:
-            raise Exception ("Cannot reset geodatabase because it does not exist")
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
 
         # modifying current arcpy env
         arcpy.env.workspace = self.gdb_path
         # just setting current gdb as default. need to debug to figure out why have to do this way
         self.project.arcObject.defaultGeodatabase = self.gdb_path
+        self.project.arcObject.save()
     
     def save_gdb(self):
         # using try to avoid errors in case of file lock
@@ -926,7 +926,8 @@ class TransitNetwork:
         Transit network class for place
         :param place_name: str | name of the place
         :param modes: list | modes to be included in the transit network {"all", "bus", "heavy_rail", "light_rail",
-        "regional_rail", "ferry", "gondola", "funicular", "trolleybus", "monorail"} (see GTFS route_types)
+        "regional_rail", "ferry", "gondola", "funicular", "trolleybus", "monorail"}
+        (for more, see gtfs_tools.route_types documentation)
 
         **Methods:**
             get_transit_agencies_for_place: creates a list of transit agencies that serve place (see method doc)
@@ -1085,119 +1086,8 @@ class NetworkDataset:
         logging.info(f"Network dataset successfully built in {process_run_time} second")
         return self.path
 
-class Place:
-    def __init__(self, arcgis_project:ArcProject, name=None, bound_box=None):
-        if name is None and bound_box is None:
-            raise ValueError("Must provide either a place or bounding box")
-        # parameters
-        self.arcgis_project = arcgis_project
-        self.name = name
-        self.bound_box = bound_box
-
-        # important attributes not passed
-        self.reference_place = ({"place_name": self.name})
-        self.reference_place["bound_box"] = self.bound_box
-        self.snake_name = create_snake_name(self.reference_place)
-        # cache folder for place
-        self.cache_folder = CacheFolder(self.snake_name)
-
-        # attributes to check whether certain things exist
-        self.street_network_data_exists = False
-        self.elevation_data_exists = False
-        self.gdb_exists = False
-        self.feature_dataset_exists = False
-        self.streets_feature_classes_exists = False
-        self.network_dataset_types = []
-        self.network_datasets_built = {}
-
-        # set up cache folder when initializing instance if one doesn't already exist
-        if not self.cache_folder.check_if_cache_folder_exists():
-            self.cache_folder.set_up_cache_folder()
-    
-    def create_network_dataset_from_place(self, network_type="walk", use_elevation=False, full_reset=False):                                # still need to figure out what to do with bounding box rather than place
-        """
-        Creates network dataset from for specified place using OSM street network data.
-        :param network_type: 
-        :param use_elevation: 
-        :return: 
-        """
-        logging.info(f"Creating network dataset for {self.name}")
-
-        if not use_elevation:
-            # add no_z to network_type if not using elevation to work with network_types_attributes dict (see module)
-            network_type += "no_z"
-        else:
-            # add _z to network_type if using elevation to work with network_types_attributes dict (see module)
-            network_type += "_z"
-        
-        # create StreetNetwork object for this place
-        street_network_for_place = StreetNetwork(self.name, network_type=network_type)
-
-        # prepare geodatabase and create feature dataset
-        geodatabase_for_place = GeoDatabase(self.arcgis_project, street_network=street_network_for_place)
-        geodatabase_for_place.set_up_gdb(reset=full_reset)
-        feature_dataset_for_place = FeatureDataset(geodatabase_for_place, street_network_for_place,
-                                                   network_type=network_type, reset=full_reset)
-        feature_dataset_for_place.create_feature_dataset()
-
-        # elevation handling for street network
-        if not use_elevation:
-            street_network_for_place.get_street_network_from_osm()
-            # take street network map to feature classes
-            street_feature_classes_for_place = StreetFeatureClasses(feature_dataset_for_place, street_network_for_place,
-                                                                    use_elevation=False,
-                                                                    reset=full_reset)
-        else:
-            # reset just to be safe with calculating elevation
-            street_network_for_place.get_street_network_from_osm()
-            elevation_mapper_for_place = ElevationMapper(street_network_for_place)
-            elevation_mapper_for_place.add_elevation_data_to_nodes()
-            elevation_mapper_for_place.add_grades_to_edges()
-            street_feature_classes_for_place = StreetFeatureClasses(feature_dataset_for_place, street_network_for_place,
-                                                                    use_elevation=True,
-                                                                    reset=True)
-
-        street_feature_classes_for_place.create_empty_feature_classes()
-        street_feature_classes_for_place.add_street_network_data_to_feature_classes()
-        street_feature_classes_for_place.save_street_feature_classes_to_shapefile()
-
-
-        # create and build network dataset from streets feature classes
-        network_dataset_for_place = NetworkDataset(feature_dataset_for_place, network_type=network_type,
-                                                   reset=full_reset)
-        network_dataset_for_place.create_network_dataset()
-        network_dataset_for_place.build_network_dataset()
-        
-    def reset_place_cache(self):
-        if self.cache_folder.check_if_cache_folder_exists():
-            raise Exception(f"Cannot reset cache folder for place {self.snake_name}")
-
-    def check_if_place_elevation_data_exists(self):
-        pass
-
-    def check_if_gdb_exists(self):
-        pass
-
-    def check_if_street_network_data_exists(self):
-        pass
-
-    def check_if_feature_dataset_exists(self):
-        pass
-
-    def check_if_streets_feature_classes_exists(self):
-        pass
-
 # makig sure that network analyst extension is checked back in after done running
 if network_analyst_extension_checked_out:
     check_network_analyst_extension_back_in()
-
-
-# # # # # # # # # # # # # # # # # # Testing Area :::: DO NOT REMOVE "if __name__ ..." # # # # # # # # # # # # # # # # #
-
-if __name__ == "__main__":
-    arc_package_project = ArcProject("network_dataset_package_project")
-    arc_package_project.set_up_project()
-    Brisbane = Place(arc_package_project, "El Cerrito, California, USA")
-    Brisbane.create_network_dataset_from_place(network_type="walk", use_elevation=True)
 
 
