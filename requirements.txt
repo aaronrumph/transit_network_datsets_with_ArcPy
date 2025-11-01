@@ -13,3 +13,5 @@ arcgis~=2.4.0.1
 
 # other requirements:
 # transit_land_api_key
+
+pluscodes~=2022.1.3
