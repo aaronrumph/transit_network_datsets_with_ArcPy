@@ -16,8 +16,10 @@ transit_land_api_key = os.getenv("TRANSIT_LAND_API_KEY")
 from general_tools import *
 
 
-# main code block
-route_types:dict = {
+# main code block #
+
+# dictionary of gtfs route types to common names
+transit_modes:dict = {
     "0": "tram",
     "1": "metro",
     "2": "rail",
@@ -29,8 +31,56 @@ route_types:dict = {
     "11": "trolleybus",
     "12": "monorail"
 }
+
+default_mode_attributes = {
+    "0": {
+        "vehicle_id" : "00000000",
+        "vehicle_name": "default_tram",
+        "max_speed_mph": 50,
+        "avg_acceleration_rate_f_per_s_squared": 2,
+        "avg_deceleration_rate_f_per_s_squared": 2
+    },
+    "1": {
+        "vehicle_id" : "00000001",
+        "vehicle_name": "default_metro",
+        "max_speed_mph": 60,
+        "avg_acceleration_rate_f_per_s_squared": 2.79,
+        "avg_deceleration_rate_f_per_s_squared": 2.79
+    },
+    "2": {
+        "vehicle_id" : "00000002",
+        "vehicle_name": "default_rail",
+        "max_speed_mph": 80,
+        "avg_acceleration_rate_f_per_s_squared": 2,
+        "avg_deceleration_rate_f_per_s_squared": 2
+    }
+}
+
 # in case want to get route type number based on common name for route type (e.g., "bus" -> "3")
-route_types_reverse_lookup:dict = {value: key for key, value in route_types.items()}
+route_types_reverse_lookup:dict = {value: key for key, value in transit_modes.items()}
+
+class TransitMode:
+    def __init__(self, gtfs_route_type:str, mode_name:str):
+        self.gtfs_route_type = gtfs_route_type
+        self.mode_name = mode_name
+
+class TransitVehicle:
+    def __init__(self, vehicle_id:str, vehicle_mode:TransitMode, vehicle_name:str, max_speed_mph:float,
+                 avg_acceleration_rate_f_per_s_squared:float=None,
+                 avg_deceleration_rate_f_per_s_squared:float=None):
+        self.vehicle_id = vehicle_id
+        self.transit_mode = vehicle_mode
+        self.vehicle_name = vehicle_name
+        self.max_speed_mph = max_speed_mph
+        self.avg_acceleration_rate_f_per_s_squared = avg_acceleration_rate_f_per_s_squared
+        self.avg_deceleration_rate_f_per_s_squared = avg_deceleration_rate_f_per_s_squared
+
+        if self.avg_acceleration_rate_f_per_s_squared is None or self.avg_deceleration_rate_f_per_s_squared is None:
+            self.avg_acceleration_rate_f_per_s_squared = default_mode_attributes[
+                self.transit_mode.gtfs_route_type]["avg_acceleration_rate_f_per_s_squared"]
+            self.avg_deceleration_rate_f_per_s_squared = default_mode_attributes[
+                self.transit_mode.gtfs_route_type]["avg_deceleration_rate_f_per_s_squared"]
+
 
 class TransitAgency:
     """ 
@@ -54,18 +104,9 @@ class TransitAgency:
         self.operator = operator
         self.places = places
 
-class TransitVehicle:
-    def __init__(self, vehicle_id:str, vehicle_type:str, max_speed_mph:float, avg_acceleration_rate:float,
-                 avg_deceleration_rate:float=None):
-        self.vehicle_id = vehicle_id
-        self.vehicle_type = vehicle_type
-        self.max_speed_mph = max_speed_mph
-        self.avg_acceleration_rate = avg_acceleration_rate
-        self.avg_deceleration_rate = avg_deceleration_rate
+        def get_gtfs_data_for_agency(self):
+            pass
 
-        # avg deceleration rate defaults to the same as avg acceleration rate
-        if self.avg_deceleration_rate is None:
-            self.avg_deceleration_rate = self.avg_acceleration_rate
 
     def calculate_acceleration_time(self):
         pass
@@ -84,7 +125,7 @@ class TransitVehicle:
 
 # need to figure out what attributes for transit route will be
 class TransitRoute:
-    def __init__(self, route_id:str, route_agency:str, route_type:str, transit_vehicles:list[TransitVehicle],
+    def __init__(self, route_id:str, route_agency:str, route_type:TransitMode, transit_vehicles:list[TransitVehicle],
                  policy_standing_time_seconds:int, stations:list[TransitStation]):
         self.route_id = route_id
         self.route_agency = route_agency
