@@ -4,7 +4,6 @@ from pathlib import Path
 
 from arcgis import features
 
-
 # Setting up python environment/making sure env points to extensions correctly
 arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
 arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
@@ -17,12 +16,14 @@ import arcpy_init
 
 import pickle
 import logging
-import osmnx as ox                   # used for getting streets data
+import osmnx as ox  # used for getting streets data
 import geopandas as gpd
 import networkx as nx
-import time                          # used for checking runtimes of functions/methods
-import requests                      # used for USGS API querying
-import multiprocessing as mp         # used for querying in bulk
+import time  # used for checking runtimes of functions/methods
+import requests  # used for USGS API querying
+import multiprocessing as mp  # used for querying in bulk
+import asyncio # used for querying USGS api asynchronously
+import aiohttp # same as requests (basically) but for asyncio
 from itertools import repeat
 import re
 import platform
@@ -30,6 +31,8 @@ import platform
 # local module(s)
 import transit_data_for_arcgis
 import network_types
+from general_tools import create_snake_name
+from general_tools import ReferencePlace
 
 # making sure that using windows because otherwise cannot use arcpy and ArcGIS
 if platform.system() != "Windows":
@@ -64,6 +67,7 @@ class ArcProject:
         Methods:
             set_up_project(self) (see documentation below)
     """
+
     def __init__(self, name, project_location=Path(__file__).parent, reset=False):
         self.name = name
         self.project_location = project_location
@@ -96,47 +100,13 @@ class ArcProject:
         return self.path
     # add more methods here. Add map, etc.
 
+
 # global functions needed at global level to do multiprocessing for API queries
 def init_worker(counter, lock):
     # initializer function for multiprocess processes, need in order to have a global variable accessible to all workers
     global shared_counter, shared_lock
     shared_counter = counter
     shared_lock = lock
-
-def generic_get_elevation_function(process_start_time, total_nodes, idx, x_y: tuple):
-    # this is the generic function for getting elevation from API for a point x_Y
-    usgs_url = r"https://epqs.nationalmap.gov/v1/json"
-    lon = x_y[0]
-    lat = x_y[1]
-    parameters_for_usgs_api = {"x": lon, "y": lat, "units": "Meters", "wkid": 4326}
-
-    try:
-        response = requests.get(usgs_url, params=parameters_for_usgs_api, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        elevation = data.get("value")
-
-        if elevation == -1000000:  # no data available (-1000000 is default for no value)
-            elevation = None
-
-        # fixed node counter
-        with shared_lock:
-            shared_counter.value += 1
-            current = shared_counter.value
-        time_since_start = time.perf_counter() - process_start_time
-        time_in_min_secs = {"minutes": int(time_since_start/60), "seconds": time_since_start % 60}
-        total_expected_time = {"minutes": int((total_nodes / 7)/60), "seconds": (total_nodes / 8) % 60}
-        # progress counter
-        print(f"\rElevation: {current}/{total_nodes} nodes | Time: "
-              f"{time_in_min_secs['minutes']:.0f}m {time_in_min_secs['seconds']:.1f}s / "
-              f"{total_expected_time['minutes']:.0f}m {total_expected_time['seconds']:.1f}s (expected runtime)",
-              end="", flush=True)
-
-        return elevation
-
-    except Exception as e:
-        logging.warning(f"Error getting elevation for node {idx}: {e}")
-        return None
 
 # functions for dealing with checking network analyst extension in and out
 def check_out_network_analyst_extension():
@@ -152,6 +122,7 @@ def check_out_network_analyst_extension():
     else:
         raise Exception("Network Analyst extension is not available")
 
+
 def check_network_analyst_extension_back_in():
     """
     Checks network analyst extension back in
@@ -164,47 +135,6 @@ def check_network_analyst_extension_back_in():
         return True
     else:
         raise Exception("Network Analyst extension is not checked out")
-
-# most important place for exception handling because this is main API interface
-def create_snake_name(reference_place:dict):
-    """
-    Creates snake name from place name and/or bounding box
-    (e.g., "San Francisco, California, USA -> "san_francisco_california_usa"
-        "Chicago, Illinois, USA" -> "chicago_illinois_usa")
-
-    :param reference_place: dict {"place_name": str, ("bound_box": [str,str,str,str])}
-    :return: Snake name for Place
-    """
-    snake_name = ""
-    place_name = reference_place["place_name"]
-    bound_box = reference_place["bound_box"]
-
-
-    # check that bounding box is correct format
-    longitude_regex_matching_pattern = r"^-?(?:180(?:\.0+)?|1[0-7]\d(?:\.\d+)?|[0-9]?\d(?:\.\d+)?)$"                     # built using regex generator because regex hard: https://regex-generator.olafneumann.org/?sampleText=37.8756042493731%2C%20-122.25673119583979%2C%2037.86793816657368%2C%20-122.26589867674299&flags=i
-
-    # first checking if bound box provided
-    if bound_box is not None:
-        # next checking that each element in bounding box is 1. a str, 2. only float-ables, and 3. between -180 and 180
-        for coord in reference_place["bound_box"]:
-            if type(coord) != str:
-                raise ValueError("Bounding box coordinates must be strings")
-            if not re.match(r"-?\d+(?:\.\d+)?", coord):
-                raise ValueError("Bounding box coordinates must be strings containing only digits and decimal points")
-            if not re.match(longitude_regex_matching_pattern, coord):
-                raise ValueError("Bounding box coordinates must be between -180 and 180")
-
-            # now checking that bounding box contains valid format for osmnx purposes
-
-    # here add code to create snake name based on bounding box (gonna use plus codes of bounding box corners!!!!!!)
-        #####
-        #####
-
-
-    # need special handling for if name of place has a white space for file names                                        #
-    snake_name = place_name.replace(",", "").replace(" ", "_").lower()
-
-    return snake_name
 
 
 class CacheFolder:
@@ -223,13 +153,14 @@ class CacheFolder:
             reset_cache_folder(): Completely reset the cache folder for the city (highly unadvisable because deletes
                 osm data and elevation data
     """
+
     def __init__(self, network_snake_name):
         assert not re.match("[A-Z]", network_snake_name) and not re.match(" ", network_snake_name), \
             "Argument network_snake_name must be a properly formed snake name (no spaces, lowercase only)"
         self.network_snake_name = network_snake_name
         self.env_dir_path = Path(__file__).parent
         self.path = os.path.join(self.env_dir_path, "place_caches", f"{self.network_snake_name}_cache")
-    
+
     def check_if_cache_folder_exists(self):
         """ Returns True if cache folder already exists for the city."""
         if os.path.exists(self.path):
@@ -243,15 +174,16 @@ class CacheFolder:
             raise Exception(f"There is already a cache folder for {self.network_snake_name}")
         else:
             os.makedirs(self.path)
-        
+
     def reset_cache_folder(self):
         # completely reset the cache folder for the city
         if not os.path.exists(self.path):
             raise Exception(f"Cannot reset the cache folder for {self.network_snake_name} "
                             f"because no such folder exists"
-            )
+                            )
         else:
             os.makedirs(self.path, exist_ok=True)
+
 
 # simple Cache class with obvious methods (read, write, check if exists)
 class Cache:
@@ -268,7 +200,8 @@ class Cache:
         read_cache_data(): reads cached data from cache file
         write_cache_data(): writes desired data to cache file
     """
-    def __init__(self, cache_folder:CacheFolder, cache_name):
+
+    def __init__(self, cache_folder: CacheFolder, cache_name):
         self.cache_folder = cache_folder
         self.cache_name = cache_name
         self.cache_path = os.path.join(self.cache_folder.path, self.cache_name)
@@ -290,6 +223,7 @@ class Cache:
     def write_cache_data(self, data_to_cache):
         with open(self.cache_path, "wb") as cache_file:
             pickle.dump(data_to_cache, cache_file)
+
 
 # StreetNetwork class very bare bones, just gets street network graph and makes associated GeoDataframse
 class StreetNetwork:
@@ -319,16 +253,18 @@ class StreetNetwork:
 
 
     """
+
     def __init__(self, city_name, network_type="walk_no_z", bound_box=None):
         #### need to make __init__ method cleaner ####
         self.city_name = city_name
-        self.network_type = network_type   
+        self.network_type = network_type
         self.bound_box = bound_box  # need to figure out how I want to deal with bounding boxes
 
-        # create snake name for streetnetwork
-        self.snake_name =  create_snake_name({"place_name": self.city_name, "bound_box": self.bound_box})
+        # create snake name for StreetNetwork
+        self.reference_place = ReferencePlace(place_name=city_name, bound_box=bound_box)
+        self.snake_name = create_snake_name(self.reference_place)
 
-        self.cache_folder = CacheFolder(self.snake_name) # cache folder for this street network!
+        self.cache_folder = CacheFolder(self.snake_name)  # cache folder for this street network!
         self.osmnx_type = network_types.network_types_attributes[self.network_type]["osmnx_network_type"]
 
         # check if there is a cache folder for desired street network
@@ -401,6 +337,7 @@ class StreetNetwork:
         else:
             return len(self.network_edges)
 
+
 # ElevationMapper class adds elevation to nodes and grades to edges (coming soon?) using USGS EPQS API
 class ElevationMapper:
     """ WARNINGS!:
@@ -415,118 +352,151 @@ class ElevationMapper:
             add_elevation_data_to_edges(): calculates grades for edges based on elevation data (must be called after
                 add_elevation_data_to_nodes)
     """
-    def __init__(self, street_network:StreetNetwork, threads_available=mp.cpu_count(), reset=False):
+
+    def __init__(self, street_network: StreetNetwork, concurrent_requests_desired:int=300, reset=False):
         self.street_network = street_network
-        self.threads_available = threads_available
+        self.concurrent_requests_desired = concurrent_requests_desired
         self.reset = reset
         (self.street_network_graph, self.street_network_nodes, self.street_network_edges) = (
             street_network.network_graph, street_network.network_nodes, street_network.network_edges
         )
         self.node_counter = 0
         self.elevation_cache = Cache(street_network.cache_folder, "elevation")
+        self.nodes_without_elevation = 0
 
-    # using multiprocessing to get elevation data if no cache exists
+    # decided to switch to using asyncio rather than multiprocessing because is I/O bound
+    async def get_elevation_data_single_query(self, async_session:aiohttp.ClientSession,
+                                              idx, lon, lat, semaphore: asyncio.Semaphore, node_counter,
+                                              total_nodes, start_time):
+        usgs_url = "https://epqs.nationalmap.gov/v1/json"
+        params = {"x": float(lon), "y": float(lat), "units": "Meters", "wkid": 4326}
+
+        # using semaphore to limit number of concurrent requests
+        async with semaphore:
+            # using try in case of exception in getting elevation for node
+            try:
+                # essentially same as requests.get but for async function. Timeout set as 30s should be high enough but
+                # 45 or 60s might be better
+                async with async_session.get(usgs_url, params=params, timeout=60) as response:
+
+                    if response.status != 200:
+                        raise Exception(f"HTTP {response.status}: {await response.text()}")
+
+                    # wait on response then get the "value" output received from the API
+                    elevation_data_response = await response.json()
+                    elevation = elevation_data_response.get("value")
+
+                    # check whethere received actual data or default no data, which for usgs is -1000000
+                    if elevation == -1000000:
+                        elevation = None
+
+                    # update counter for progress tracking
+                    node_counter["nodes_completed"] += 1
+                    current_node = node_counter["nodes_completed"]
+                    time_elapsed = time.perf_counter() - start_time
+                    querying_rate = current_node / time_elapsed if time_elapsed > 0 else 0
+                    estimated_total_time = total_nodes / querying_rate if querying_rate > 0 else 0
+
+                    # convert the elapsed time and estimated time into minutes and seconds for prettier printing
+                    time_elapsed_in_minutes_and_seconds = {"minutes": time_elapsed // 60, "seconds": time_elapsed % 60}
+                    estimated_total_time_in_minutes_and_seconds = {"minutes": estimated_total_time // 60,
+                                                                   "seconds": estimated_total_time % 60}
+                    # printing progress bar/tracker thingy
+                    print(f"\rElevation: {current_node}/{total_nodes} nodes processed. "
+                          f"{time_elapsed_in_minutes_and_seconds['minutes']:.1f} minutes:"
+                          f"{time_elapsed_in_minutes_and_seconds['seconds']:.1f} seconds / "
+                          f"{estimated_total_time_in_minutes_and_seconds['minutes']:.1f} minutes:"
+                          f"{estimated_total_time_in_minutes_and_seconds['seconds']:.1f} seconds"
+                          f" (elapsed time/estimated total time). Rate = {querying_rate} nodes/second",
+                          end="", flush=True)
+
+                    logging.warning(f"Couldn't get elevation for {self.nodes_without_elevation}/{total_nodes} nodes.")
+
+                    # now that have elevation can return the index of the node (from itterrowing them) and its elevation
+                    return idx, elevation
+
+            # in case of exception, just returning None as the elevation for the node.
+            except Exception as e:
+                self.nodes_without_elevation += 1
+                return idx, None
+
+        logging.warning(f"Couldn't get eleavation for {self.nodes_without_elevation}/{total_nodes} nodes")
+        return idx, None
+
+    # this function just tells the little async worker thingies how and when to query the API
+    async def get_all_elevation_data(self):
+        """
+        Gets elevation data for all nodes in street network using the async function get_elevation_data_single_query.
+        :return:
+        """
+        # nodes to go through
+        nodes_list = [(idx, float(row["x"]), float(row["y"])) for idx, row in self.street_network_nodes.iterrows()]
+
+        # the semaphore is the host of the restaurant in the Guido asyncio restaurant analogy
+        semaphore = asyncio.Semaphore(self.concurrent_requests_desired)
+
+        # have to manually define TCP connector to force close otherwise leave zombie connections
+        connector = aiohttp.TCPConnector(limit=300, limit_per_host=300, ttl_dns_cache=300, enable_cleanup_closed=True,
+                                        force_close=True)
+
+        node_counter = {"nodes_completed": 0}
+        start_time = time.perf_counter()
+        total_nodes = len(nodes_list)
+
+
+        # open new aiohttp session (basically does same as response = response.get...)
+        async with aiohttp.ClientSession(connector=connector) as session:
+
+            # only asyncio task is getting elevation data for each node
+            tasks = [self.get_elevation_data_single_query(async_session=session, idx=idx, lon=lon, lat=lat,
+                                                          semaphore=semaphore, node_counter=node_counter,
+                                                          total_nodes=total_nodes, start_time=start_time)
+                    for idx, lon, lat in nodes_list]
+
+            # results from querying elevation API for each node
+            results = await asyncio.gather(*tasks)
+            return dict(results)
+
+    # this method is the main method that actually sends out for the elevation data, and then adds it to street network
     def add_elevation_data_to_nodes(self):
-        """
-        Adds elevation data to nodes from USGS Elevation Point Query Service (EPQS) API using multiprocessing
-        :return: None (data state modifier)
-        """
-        logging.info("Adding elevation to nodes")
 
-        # in case no elevation data exists
-        if not self.elevation_cache.check_if_cache_already_exists() or self.reset:
-            logging.info("Getting elevation data from USGS EPQS API")
-    
-            number_of_nodes_total = len(self.street_network_nodes)
-            idx_args_for_elevation = [] # only useful for tracking progress
-            x_y_args_for_elevation = [] # list of tuples of x,y values
+        logging.info(f"Adding elevation to the street network for {self.street_network.city_name}")
 
-            # making lists of desire arguments so can use .starmap()
-            for idx, (node_idx, row) in enumerate(self.street_network_nodes.iterrows()):
-                idx_args_for_elevation.append(idx)
-                x_y_pair = (row["x"], row["y"])
-                x_y_args_for_elevation.append(x_y_pair)
+        # run the async function to get the elevation data for all the nodes
+        elevation_data = asyncio.run(self.get_all_elevation_data())
 
-            shared_counter = mp.Value("i", 0)  # "i" for integer
-            lock = mp.Lock()
-            process_start_time = time.perf_counter()
+        # make list of elevations
+        z_values:list = [elevation_data.get(idx) for idx in elevation_data]
+        # update the local street network gdf within the ElevationMapper
+        self.street_network_nodes["z"] = z_values
+        self.street_network.network_nodes["z"] = z_values
 
-            # using multiprocessing to send as many API requests at once as possible
-            with mp.Pool(processes=self.threads_available,
-            initializer=init_worker,
-            initargs=(shared_counter, lock)) as pooled_threads:
-                z_values = pooled_threads.starmap(generic_get_elevation_function,
-                    zip(repeat(process_start_time), repeat(number_of_nodes_total),
-                        idx_args_for_elevation, x_y_args_for_elevation
-                    )
-                )
-            pooled_threads.close()
+        # cache elevation_data dict {<node_idx>: <elevation>}
+        self.elevation_cache.write_cache_data(elevation_data)
 
-            self.street_network_nodes["z"] = z_values
-            self.elevation_cache.write_cache_data(self.street_network_nodes["z"].to_dict())
+        # now add to the original graph
+        for node_idx, elevation in elevation_data.items():
+            if node_idx in self.street_network_graph.nodes:
+                elevation_value = float(elevation) if elevation is not None else None
+                self.street_network_graph.nodes[node_idx]["elevation"] = elevation_value
+                self.street_network_graph.nodes[node_idx]["z"] = elevation_value
 
-            # updating street network attributes
-            self.street_network.network_nodes["z"] = z_values  # updating input StreetNetwork object
-            # going through gdf nodes to update graph nodes so can use elevation when calculate edge grades
-            for node_idx, elevation in zip(self.street_network_nodes.index, z_values):
-                if node_idx in self.street_network_graph.nodes:
-                    # need elevation to be float rather than str to calculate edges
-                    elevation_value = float(elevation) if elevation is not None else None
-                    self.street_network_graph.nodes[node_idx]["elevation"] = elevation_value
-                    self.street_network_graph.nodes[node_idx]["z"] = elevation_value
-            self.street_network.elevation_enabled = True
-            
-            # outputs for method
-            run_time = time.perf_counter() - process_start_time
-            logging.info(f"Got elevation data for {len(self.street_network_nodes)} nodes in {run_time} seconds")
-            return self.street_network_nodes
+        # update the elevation enabled flag
+        self.street_network.elevation_enabled = True
 
-        else: # if elevation data already cached
-            logging.info("Using cached elevation data")
-            z_values = self.elevation_cache.read_cache_data()   # loading elevation data from cache
+        # print extra blank line after progress bar thingy
+        print()
+        logging.info(f"Got elevation data for {len(self.street_network_nodes)} nodes")
+        logging.info("Elevation data added to the street network")
 
-            # check if the nodes gdf already has elevation
-            if "z" not in self.street_network_nodes.columns:
-                self.street_network_nodes["z"] = self.street_network_nodes.index.map(z_values)
-                # updating input StreetNetwork objects
-                self.street_network.network_nodes["z"] = self.street_network_nodes.index.map(z_values)
-                # going through gdf nodes to update graph nodes so can use elevation when calculate edge grades
-                for node_idx in self.street_network_nodes.index:
-                    # all the nodes from the nodes gdf should be in the graphML but just making sure
-                    if node_idx in self.street_network_graph.nodes and node_idx in z_values:
-                        elevation_value = float(z_values[node_idx]) if z_values[node_idx] is not None else None
-                        self.street_network_graph.nodes[node_idx]["elevation"] = elevation_value
-                        self.street_network_graph.nodes[node_idx]["z"] = elevation_value
-                    else:
-                        logging.warning("Some node is in the geodataframe but not the graphML")
-                logging.info("Successfully added elevation data to nodes from cache")
-                # mark that has elevation now
-                self.street_network.elevation_enabled = True
-            else:
-                logging.info("Nodes gdf already has z values")
-                # going through gdf nodes to update graph nodes so can use elevation when calculate edge grades
-                for node_idx in self.street_network_nodes.index:
-                    # all the nodes from the nodes gdf should be in the graphML but just making sure
-                    if node_idx in self.street_network_graph.nodes:
-                        z_value = self.street_network_nodes.loc[node_idx, "z"]
-                        
-                        elevation_value = float(z_value) if z_value is not None and z_value != "" else None
-                        self.street_network_graph.nodes[node_idx]["elevation"] = elevation_value
-                        self.street_network_graph.nodes[node_idx]["z"] = elevation_value
-                    else:
-                        logging.warning("Some node is in the geodataframe but not the graphML")
-                self.street_network.elevation_enabled = True
-
-            # method output
-            return self.street_network
-
-    ### need to calculate grades for edges so can make walking time vary with slope ###
     def add_grades_to_edges(self):
         """
         Calculates and adds grade (slope) to edges based on node elevations.
         Grade is calculated as: (elevation_change / edge_length) * 100
-        Positive grade = uphill, Negative grade = downhill
+        Positive grade = uphill, Negative grade = downhill, Grade = 0 means flat ground
         """
+        number_of_edges_without_elevation_data = 0
+
         process_start_time = time.perf_counter()
         logging.info(f"Adding grades to edges for {self.street_network.snake_name} street network")
 
@@ -549,14 +519,17 @@ class ElevationMapper:
                 # updating graph data based on calculated grades
                 data["grade"] = round(grade, 2)  # rounding because otherwise crazy number
 
-                data["grade_magnitude"] = round(abs(grade), 2) #
+                data["grade_magnitude"] = round(abs(grade), 2)  #
                 data["direction"] = 1 if grade > 0 else 0
             else:
+                number_of_edges_without_elevation_data += 1
                 # handling missing data
                 data["grade"] = None
                 data["grade_magnitude"] = None
                 data["direction"] = None
-                logging.warning(f"Missing elevation or length data for edge: Node 1:{start_node}-Node 2:{end_node}-key:{key}")
+
+        logging.warning(f"Missing elevation or length data for {number_of_edges_without_elevation_data}/"
+                    f"{len(self.street_network_graph.edges())} edges total")
 
         # update the edges geodataframe
         self.street_network.network_nodes, self.street_network.network_edges = ox.graph_to_gdfs(
@@ -566,14 +539,14 @@ class ElevationMapper:
         process_run_time = time.perf_counter() - process_start_time
         logging.info(f"Successfully added grades to edges in {process_run_time:.2f} seconds")
 
+
 ### need to review GeoDatabase and ArcProject classes code to make sure no errors
 class GeoDatabase:
-    def __init__(self, arcgis_project:ArcProject, street_network:StreetNetwork):
+    def __init__(self, arcgis_project: ArcProject, street_network: StreetNetwork):
         self.project = arcgis_project
         self.street_network = street_network
         self.project_file_path = arcgis_project.path
         self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.street_network.snake_name}.gdb")
-
 
     def set_up_gdb(self, reset=False):
         """ Creates geodatabase if one does not exist, and resets it if reset desired."""
@@ -598,8 +571,7 @@ class GeoDatabase:
         arcpy.env.workspace = self.gdb_path
         # just setting current gdb as default. need to debug to figure out why have to do this way
         self.project.arcObject.defaultGeodatabase = self.gdb_path
-        self.project.arcObject.save()
-    
+
     def save_gdb(self):
         # using try to avoid errors in case of file lock
         try:
@@ -610,15 +582,14 @@ class GeoDatabase:
             logging.warning(f"Could not save project (file may locked or project open: {e}")
 
 
-class FeatureDataset:                                                                                                    # add scenario_id so can do multiple scenarios of same network type
-    def __init__(self, gdb:GeoDatabase, street_network:StreetNetwork, network_type:str="walk_no_z", reset=False):
+class FeatureDataset:  # add scenario_id so can do multiple scenarios of same network type
+    def __init__(self, gdb: GeoDatabase, street_network: StreetNetwork, network_type: str = "walk_no_z", reset=False):
         self.gdb = gdb
         self.street_network = street_network
         self.network_type = network_type
         self.reset = reset
         self.name = f"{self.network_type}_fd"
         self.path = os.path.join(self.gdb.gdb_path, f"{self.name}")
-
 
         # if reset true, then overwrite existing features
         arcpy.env.overwriteOutput = True
@@ -636,7 +607,7 @@ class FeatureDataset:                                                           
         # creating feature dataset
         arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.name,
                                               spatial_reference=arcpy.SpatialReference(4326)
-        )
+                                              )
         logging.info("Feature dataset successfully created")
 
     def reset_feature_dataset(self):
@@ -646,8 +617,9 @@ class FeatureDataset:                                                           
         else:
             arcpy.Delete_management(self.path)
             arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.name,
-                                              spatial_reference=arcpy.SpatialReference(4326)
-            )
+                                                  spatial_reference=arcpy.SpatialReference(4326)
+                                                  )
+
 
 class StreetFeatureClasses:
     """
@@ -664,10 +636,11 @@ class StreetFeatureClasses:
         add_street_network_data_to_feature_classes(): Adds street network data to empty feature classes created
     """
 
-    def __init__(self, feature_dataset:FeatureDataset, street_network:StreetNetwork, use_elevation=False, reset=False):
+    def __init__(self, feature_dataset: FeatureDataset, street_network: StreetNetwork, use_elevation=False,
+                 reset=False):
         self.feature_dataset = feature_dataset
         self.street_network = street_network
-        self.use_elevation = use_elevation # determines whether to add z values to nodes in feature classes
+        self.use_elevation = use_elevation  # determines whether to add z values to nodes in feature classes
         self.reset = reset
 
         # paths for the two feature classes
@@ -677,16 +650,15 @@ class StreetFeatureClasses:
         # useful shorthand to have rather than writing self.street_network.network_nodes etc all the time
         self.nodes = street_network.network_nodes
         self.edges = street_network.network_edges
-        
+
         # error handling for using elevation when creating feature classes for street network
         if "z" not in self.street_network.network_nodes and self.use_elevation:
             raise Exception("Cannot use elevation because input StreetNetwork object has no z values")
 
-
     # method to set up empty feature classes for street network which data can be copied to
     def create_empty_feature_classes(self):
         logging.info("Creating empty feature classes for street network")
-        
+
         # in case at least one of the two feature classes for street network (nodes or edges) does not exist or reset
         if (not (arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path))) or self.reset:
             # possible case here is that one exists but not the other so need to overwrite to be on
@@ -694,19 +666,19 @@ class StreetFeatureClasses:
 
             # if want to use elevation for network dataset (already checked to make sure data has necessary z values)
             if self.use_elevation:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc",
-                                    geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326), 
-                                        has_z="ENABLED")
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc",
-                                    geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326),
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc", geometry_type="POINT",
+                                                    spatial_reference=arcpy.SpatialReference(4326),
+                                                    has_z="ENABLED")
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc", geometry_type="POLYLINE",
+                                                    spatial_reference=arcpy.SpatialReference(4326),
                                                     )
 
             # not using elevation
             else:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc",
-                                    geometry_type="POINT", spatial_reference=arcpy.SpatialReference(4326))
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc",
-                                    geometry_type="POLYLINE", spatial_reference=arcpy.SpatialReference(4326))
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc", geometry_type="POINT",
+                                                    spatial_reference=arcpy.SpatialReference(4326))
+                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc", geometry_type="POLYLINE",
+                                                    spatial_reference=arcpy.SpatialReference(4326))
         # both street FCs exist and reset not desired, so do nothing :)
         else:
             logging.info("Existing street network feature classes found and will be used")
@@ -715,7 +687,6 @@ class StreetFeatureClasses:
         # method outputs
         logging.info("Successfully created empty feature classes")
         return self.nodes_fc_path, self.edges_fc_path
-
 
     # method uses arcpy cursor to add OSM gdfs data to feature classes, need to fix (attr fields empty except geometry?)
     def add_street_network_data_to_feature_classes(self):
@@ -736,7 +707,7 @@ class StreetFeatureClasses:
         for col in self.nodes.columns:
             # for nodes
             if col != "geometry":
-                if col == "osmid": # need to make osmid a str because for large networks, gets too big
+                if col == "osmid":  # need to make osmid a str because for large networks, gets too big
                     field_type = "TEXT"
                     arcpy.management.AddField(self.nodes_fc_path, col, field_type, field_length=2048)
                 elif self.nodes[col].dtype in ["int64", "int32"]:
@@ -752,7 +723,7 @@ class StreetFeatureClasses:
         # now mapping non geometry fields for edges
         for col in self.edges.columns:
             if col != "geometry":
-                if col == "osmid": # need to make osmid a str because for large networks, gets too big
+                if col == "osmid":  # need to make osmid a str because for large networks, gets too big
                     field_type = "TEXT"
                     arcpy.management.AddField(self.edges_fc_path, col, field_type, field_length=1024)
                     field_type = "TEXT"
@@ -857,7 +828,7 @@ class StreetFeatureClasses:
             logging.info(f"Created Feature Classes from osmnx nodes and edges in {process_runtime} seconds")
             return self.nodes_fc_path, self.edges_fc_path
 
-        else: # in case where elevation not enabled
+        else:  # in case where elevation not enabled
             # attribute table fields for nodes
             node_fields = ["SHAPE@XY"] + [col for col in self.nodes.columns if col not in ["geometry", "x", "y"]]
             with arcpy.da.InsertCursor(self.nodes_fc_path, node_fields) as cursor:
@@ -882,12 +853,11 @@ class StreetFeatureClasses:
             # adding fields for network dataset creations
             logging.info("Adding necessary fields for edges")
             arcpy.management.AddField(self.edges_fc_path, "walk_time", "DOUBLE")
-            arcpy.management.CalculateField(self.edges_fc_path,"walk_time",
+            arcpy.management.CalculateField(self.edges_fc_path, "walk_time",
                                             "!Shape.length@meters! / 85",
-                "PYTHON3")
+                                            "PYTHON3")
 
             # walk time with grade fields
-
 
             # making sure no multipart edges
             with arcpy.da.SearchCursor(self.edges_fc_path, ["SHAPE@"]) as cursor:
@@ -912,16 +882,17 @@ class StreetFeatureClasses:
         # make sure not trying to erroneously save non-existent feature classes
         assert arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path), \
             "The street feature classes cannot be saved because they have not yet been created"
-        
+
         arcpy.env.overwriteOutput = True
         arcpy.conversion.FeatureClassToShapefile("nodes_fc", self.street_network.cache_folder.path)
         arcpy.conversion.FeatureClassToShapefile("edges_fc", self.street_network.cache_folder.path)
         logging.info(f"Nodes and edges feature classes succesfully saved as shapefiles in cache folder "
                      f"{self.street_network.cache_folder}")
-        arcpy.env.overwriteOutput = False # setting overwrite output back to false so no accidental overwriting
+        arcpy.env.overwriteOutput = False  # setting overwrite output back to false so no accidental overwriting
 
 class TransitNetwork:
-    def __init__(self, feature_dataset:FeatureDataset, place_name: str = None, bound_box: list = None, modes: list = None):
+    def __init__(self, feature_dataset: FeatureDataset, place_name: str = None, bound_box: list = None,
+                 modes: list = None):
         """
         Transit network class for place
         :param place_name: str | name of the place
@@ -982,7 +953,9 @@ class NetworkDataset:
         path (str): The path to the network dataset (always C:\...\<feature_dataset_name>\<network_dataset_name>.nd)
 
     """
-    def __init__(self, feature_dataset:FeatureDataset, network_type:str ="walk_no_z", use_elevation=False, reset=False):
+
+    def __init__(self, feature_dataset: FeatureDataset, network_type: str = "walk_no_z", use_elevation=False,
+                 reset=False):
         self.feature_dataset = feature_dataset
         self.network_type = network_type
         self.use_elevation = use_elevation
@@ -1017,7 +990,8 @@ class NetworkDataset:
             Path of network dataset
         """
         process_start_time = time.perf_counter()
-        logging.info(f"Creating {self.network_type} network dataset for {self.street_network.snake_name}")               # change so looks better (use short name rather than snake name)
+        logging.info(
+            f"Creating {self.network_type} network dataset for {self.street_network.snake_name}")  # change so looks better (use short name rather than snake name)
 
         # making sure network analyst checked out
         if not network_analyst_extension_checked_out:
@@ -1032,7 +1006,8 @@ class NetworkDataset:
         try:
             if self.reset:
                 arcpy.Delete_management(self.path)
-                logging.info(f"Existing network dataset {self.name} for {self.street_network.snake_name}")               # again replace snake name with short name
+                logging.info(
+                    f"Existing network dataset {self.name} for {self.street_network.snake_name}")  # again replace snake name with short name
 
             # check whether to use elevation in network dataset, raise error if no elevation data
             if self.use_elevation:
@@ -1045,8 +1020,6 @@ class NetworkDataset:
                 raise Exception("Nodes feature class for street network does not exist in feature dataset")
             if not arcpy.Exists(self.edges_fc_path):
                 raise Exception("Edges feature class for street network does not exist in feature dataset")
-
-
 
             arcpy.na.CreateNetworkDatasetFromTemplate(network_dataset_template=self.template_path,
                                                       output_feature_dataset=self.feature_dataset.path)
@@ -1085,6 +1058,7 @@ class NetworkDataset:
         process_run_time = time.perf_counter() - process_start_time
         logging.info(f"Network dataset successfully built in {process_run_time} second")
         return self.path
+
 
 # makig sure that network analyst extension is checked back in after done running
 if network_analyst_extension_checked_out:
