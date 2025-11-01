@@ -417,8 +417,8 @@
                 <NetworkAttributeParameter xsi:type='typens:NetworkAttributeParameter'>
                     <Name>Walk speed (meters per minute)</Name>
                     <VarType>5</VarType>
-                    <Value xsi:type='xs:double'>83.333333333333333</Value>
-                    <DefaultValue xsi:type='xs:double'>83.333333333333333</DefaultValue>
+                    <Value xsi:type='xs:double'>83.333299999999994</Value>
+                    <DefaultValue xsi:type='xs:double'>83.333299999999994</DefaultValue>
                     <ParameterUsageType>esriNAPUTGeneral</ParameterUsageType>
                 </NetworkAttributeParameter>
             </AttributeParameters>
@@ -704,25 +704,45 @@
             <ID>-1</ID>
             <NetworkAttributeName>WalkTime</NetworkAttributeName>
             <NetworkSourceName>edges_fc</NetworkSourceName>
-            <NetworkEvaluatorCLSID>{92B433F5-556E-4A39-B674-D02213634CC4}</NetworkEvaluatorCLSID>
+            <NetworkEvaluatorCLSID>{68055FC4-37D5-4BD0-81A5-CD177A29759C}</NetworkEvaluatorCLSID>
             <NetworkEdgeDirection>esriNEDAlongDigitized</NetworkEdgeDirection>
             <NetworkEvaluatorData xsi:type='typens:PropertySet'>
                 <PropertyArray xsi:type='typens:ArrayOfPropertySetProperty'>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
                         <Key>Version</Key>
-                        <Value xsi:type='xs:short'>1</Value>
+                        <Value xsi:type='xs:short'>2</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Arg1AttributeNameOrConstantValue</Key>
-                        <Value xsi:type='xs:string'>Length</Value>
+                        <Key>Expression</Key>
+                        <Value xsi:type='xs:string'>calculate_walk_time(!Shape!, !grade!)</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Operator</Key>
-                        <Value xsi:type='xs:string'>/</Value>
+                        <Key>PreLogic</Key>
+                        <Value xsi:type='xs:string'>import math
+
+def calculate_walk_time(shape, grade):
+    # tobler's hiking function: velocity = 6 * exp(-3.5 * |slope + 0.05|)
+    # where v is velocity in km/h and slope is rise/run (not percent)
+
+    # Convert grade from percent to slope (rise/run)
+    # grade is in percent, so divide by 100
+
+    # using Tobler's hiking function
+    # V in km/h = 6 * e^(-3.5 * |slope + 0.05|)
+    velocity_kmh = 6.0 * math.exp(-3.5 * abs(slope + 0.05))
+
+    # convert velocity from km/h to meters/minute
+    # 1 km/h = 1000 m / 60 min = 16.6667 m/min
+    velocity_m_per_min = (velocity_kmh * 1000) / 60
+
+    # get length as local varibale for this function
+    length = shape.length
+
+    return length / velocity_m_per_min</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Arg2ParameterNameOrConstantValue</Key>
-                        <Value xsi:type='xs:string'>Walk speed (meters per minute)</Value>
+                        <Key>Language</Key>
+                        <Value xsi:type='xs:string'>Python</Value>
                     </PropertySetProperty>
                 </PropertyArray>
             </NetworkEvaluatorData>
@@ -732,25 +752,45 @@
             <ID>-1</ID>
             <NetworkAttributeName>WalkTime</NetworkAttributeName>
             <NetworkSourceName>edges_fc</NetworkSourceName>
-            <NetworkEvaluatorCLSID>{92B433F5-556E-4A39-B674-D02213634CC4}</NetworkEvaluatorCLSID>
+            <NetworkEvaluatorCLSID>{68055FC4-37D5-4BD0-81A5-CD177A29759C}</NetworkEvaluatorCLSID>
             <NetworkEdgeDirection>esriNEDAgainstDigitized</NetworkEdgeDirection>
             <NetworkEvaluatorData xsi:type='typens:PropertySet'>
                 <PropertyArray xsi:type='typens:ArrayOfPropertySetProperty'>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
                         <Key>Version</Key>
-                        <Value xsi:type='xs:short'>1</Value>
+                        <Value xsi:type='xs:short'>2</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Arg1AttributeNameOrConstantValue</Key>
-                        <Value xsi:type='xs:string'>Length</Value>
+                        <Key>Expression</Key>
+                        <Value xsi:type='xs:string'>calculate_walk_time(!Shape!, -1 * !grade!)</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Operator</Key>
-                        <Value xsi:type='xs:string'>/</Value>
+                        <Key>PreLogic</Key>
+                        <Value xsi:type='xs:string'>import math
+
+def calculate_walk_time(shape, grade):
+    # tobler's hiking function: velocity = 6 * exp(-3.5 * |slope + 0.05|)
+    # where v is velocity in km/h and slope is rise/run (not percent)
+
+    # Convert grade from percent to slope (rise/run)
+    # grade is in percent, so divide by 100
+
+    # using Tobler's hiking function
+    # V in km/h = 6 * e^(-3.5 * |slope + 0.05|)
+    velocity_kmh = 6.0 * math.exp(-3.5 * abs(slope + 0.05))
+
+    # convert velocity from km/h to meters/minute
+    # 1 km/h = 1000 m / 60 min = 16.6667 m/min
+    velocity_m_per_min = (velocity_kmh * 1000) / 60
+
+    # get length as local varibale for this function
+    length = shape.length
+
+    return length / velocity_m_per_min</Value>
                     </PropertySetProperty>
                     <PropertySetProperty xsi:type='typens:PropertySetProperty'>
-                        <Key>Arg2ParameterNameOrConstantValue</Key>
-                        <Value xsi:type='xs:string'>Walk speed (meters per minute)</Value>
+                        <Key>Language</Key>
+                        <Value xsi:type='xs:string'>Python</Value>
                     </PropertySetProperty>
                 </PropertyArray>
             </NetworkEvaluatorData>
