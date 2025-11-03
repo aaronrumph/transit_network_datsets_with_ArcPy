@@ -132,6 +132,9 @@ class Schedules(TransitDataFeature):
         super().__init__("Schedules", place_name, feature_dataset, agencies)
         self.agencies = agencies
 
+gtfs_features_in_ptdm = [Stops, LineVariantElements, LVEShapes, Calendars, CalendarExceptions, Lines, LineVariants,
+                         Runs, ScheduleElements, Schedules]
+
 class PublicTransitDataModel:
     def __init__(self, place_name:str, agencies:list[TransitAgency], feature_dataset:FeatureDataset):
 
@@ -146,7 +149,7 @@ class PublicTransitDataModel:
         # list of the various transit data features that make up a public transit data model
         self.transit_data_features = []
         # go through all the different types of data features and instantiate them
-        for transit_data_feature in TransitDataFeature.__subclasses__():
+        for transit_data_feature in gtfs_features_in_ptdm:
             data_feature_instance = transit_data_feature(self.place_name, self.feature_dataset, self.agencies)
             self.transit_data_features.append(data_feature_instance)
 
@@ -157,6 +160,7 @@ class PublicTransitDataModel:
         """
         # going through all the necessary data features for a public transit data model and checking if they exist
         for data_feature in self.transit_data_features:
+
             # if ANY of the associated data features don't exist the public transit data model must be incomplete
             if not data_feature.check_if_exists():
                 logging.warning(f"Data feature {data_feature.feature_name} does not exist in feature dataset "
@@ -164,5 +168,7 @@ class PublicTransitDataModel:
                 return False
         # returns True iff ALL of the associated data features exist
         return True
+
+
 
 

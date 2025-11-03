@@ -27,12 +27,15 @@ import aiohttp # same as requests (basically) but for asyncio
 from itertools import repeat
 import re
 import platform
+import isodate
+from datetime import datetime
+from zipfile import ZipFile
 
 # local module(s)
 import transit_data_for_arcgis
 import network_types
-from general_tools import create_snake_name
-from general_tools import ReferencePlace
+from general_tools import *
+from gtfs_tools import *
 
 # making sure that using windows because otherwise cannot use arcpy and ArcGIS
 if platform.system() != "Windows":
@@ -155,8 +158,6 @@ class CacheFolder:
     """
 
     def __init__(self, network_snake_name):
-        assert not re.match("[A-Z]", network_snake_name) and not re.match(" ", network_snake_name), \
-            "Argument network_snake_name must be a properly formed snake name (no spaces, lowercase only)"
         self.network_snake_name = network_snake_name
         self.env_dir_path = Path(__file__).parent
         self.path = os.path.join(self.env_dir_path, "place_caches", f"{self.network_snake_name}_cache")
@@ -250,21 +251,22 @@ class StreetNetwork:
         Methods:
             get_street_network_from_osm(timer_on=True, reset=False): Gets street network from OpenStreetMaps or
             from cache
-
-
     """
 
-    def __init__(self, city_name, network_type="walk_no_z", bound_box=None):
+    def __init__(self, reference_place: ReferencePlace, network_type="walk_no_z"):
         #### need to make __init__ method cleaner ####
-        self.city_name = city_name
+        self.reference_place = reference_place
         self.network_type = network_type
-        self.bound_box = bound_box  # need to figure out how I want to deal with bounding boxes
+
+        # get place name and bbox out of reference place
+        self.place_name = reference_place.place_name
+        self.bound_box = reference_place.bound_box
 
         # create snake name for StreetNetwork
-        self.reference_place = ReferencePlace(place_name=city_name, bound_box=bound_box)
         self.snake_name = create_snake_name(self.reference_place)
-
-        self.cache_folder = CacheFolder(self.snake_name)  # cache folder for this street network!
+        # link cache folder
+        self.cache_folder = CacheFolder(self.snake_name)
+        # decode the network type into proper network type designation for osmnx query
         self.osmnx_type = network_types.network_types_attributes[self.network_type]["osmnx_network_type"]
 
         # check if there is a cache folder for desired street network
@@ -301,7 +303,7 @@ class StreetNetwork:
 
             # if using city, getting OSM data if not using cache or if no cache exists
             if self.bound_box is None:
-                network_graph = ox.graph_from_place(self.city_name, network_type=self.osmnx_type, retain_all=True)
+                network_graph = ox.graph_from_place(self.place_name, network_type=self.osmnx_type, retain_all=True)
                 network_nodes, network_edges = ox.graph_to_gdfs(network_graph, nodes=True, edges=True)
 
             # if using bound box, getting OSM Data
@@ -318,7 +320,7 @@ class StreetNetwork:
         # just because I want to keep track of everything
         if timer_on:
             logging.info(f"Got street network from OSM in {time.perf_counter() - process_start_time} seconds")
-            logging.info(f"Street network for {self.city_name} had {len(network_nodes)} nodes and "
+            logging.info(f"Street network for {self.place_name} had {len(network_nodes)} nodes and "
                          f"{len(network_edges)} edges")
 
         self.network_graph, self.network_nodes, self.network_edges = network_graph, network_nodes, network_edges
@@ -403,14 +405,12 @@ class ElevationMapper:
                                                                    "seconds": estimated_total_time % 60}
                     # printing progress bar/tracker thingy
                     print(f"\rElevation: {current_node}/{total_nodes} nodes processed. "
-                          f"{time_elapsed_in_minutes_and_seconds['minutes']:.1f} minutes:"
-                          f"{time_elapsed_in_minutes_and_seconds['seconds']:.1f} seconds / "
-                          f"{estimated_total_time_in_minutes_and_seconds['minutes']:.1f} minutes:"
-                          f"{estimated_total_time_in_minutes_and_seconds['seconds']:.1f} seconds"
+                          f"{time_elapsed_in_minutes_and_seconds['minutes']:.0f} minutes: "
+                          f"{time_elapsed_in_minutes_and_seconds['seconds']:.0f} seconds/"
+                          f"{estimated_total_time_in_minutes_and_seconds['minutes']:.0f} minutes: "
+                          f"{estimated_total_time_in_minutes_and_seconds['seconds']:.0f} seconds"
                           f" (elapsed time/estimated total time). Rate = {querying_rate} nodes/second",
                           end="", flush=True)
-
-                    logging.warning(f"Couldn't get elevation for {self.nodes_without_elevation}/{total_nodes} nodes.")
 
                     # now that have elevation can return the index of the node (from itterrowing them) and its elevation
                     return idx, elevation
@@ -420,7 +420,7 @@ class ElevationMapper:
                 self.nodes_without_elevation += 1
                 return idx, None
 
-        logging.warning(f"Couldn't get eleavation for {self.nodes_without_elevation}/{total_nodes} nodes")
+        logging.warning(f"Couldn't get elevation for {self.nodes_without_elevation}/{total_nodes} nodes")
         return idx, None
 
     # this function just tells the little async worker thingies how and when to query the API
@@ -460,7 +460,7 @@ class ElevationMapper:
     # this method is the main method that actually sends out for the elevation data, and then adds it to street network
     def add_elevation_data_to_nodes(self):
 
-        logging.info(f"Adding elevation to the street network for {self.street_network.city_name}")
+        logging.info(f"Adding elevation to the street network for {self.street_network.place_name}")
 
         # run the async function to get the elevation data for all the nodes
         elevation_data = asyncio.run(self.get_all_elevation_data())
@@ -548,6 +548,15 @@ class GeoDatabase:
         self.project_file_path = arcgis_project.path
         self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.street_network.snake_name}.gdb")
 
+    def save_gdb(self):
+        # using try to avoid errors in case of file lock
+        try:
+            self.project.arcObject.defaultGeodatabase = self.gdb_path
+            self.project.arcObject.save()
+            logging.info("Project saved successfully")
+        except OSError as e:
+            logging.warning(f"Could not save project (file may locked or project open: {e}")
+
     def set_up_gdb(self, reset=False):
         """ Creates geodatabase if one does not exist, and resets it if reset desired."""
         # making sure not trying to set up gdb before project
@@ -572,15 +581,8 @@ class GeoDatabase:
         # just setting current gdb as default. need to debug to figure out why have to do this way
         self.project.arcObject.defaultGeodatabase = self.gdb_path
 
-    def save_gdb(self):
-        # using try to avoid errors in case of file lock
-        try:
-            self.project.arcObject.save()
-            self.project.arcObject.defaultGeodatabase = self.gdb_path
-            logging.info("Project saved successfully")
-        except OSError as e:
-            logging.warning(f"Could not save project (file may locked or project open: {e}")
-
+        # save project to make sure that default gdb actually gets set
+        self.save_gdb()
 
 class FeatureDataset:  # add scenario_id so can do multiple scenarios of same network type
     def __init__(self, gdb: GeoDatabase, street_network: StreetNetwork, network_type: str = "walk_no_z", reset=False):
@@ -891,8 +893,8 @@ class StreetFeatureClasses:
         arcpy.env.overwriteOutput = False  # setting overwrite output back to false so no accidental overwriting
 
 class TransitNetwork:
-    def __init__(self, feature_dataset: FeatureDataset, place_name: str = None, bound_box: list = None,
-                 modes: list = None):
+    def __init__(self, feature_dataset: FeatureDataset, reference_place: ReferencePlace,
+                 modes: list = None, agencies_to_include:list[TransitAgency]=None):
         """
         Transit network class for place
         :param place_name: str | name of the place
@@ -906,38 +908,207 @@ class TransitNetwork:
 
         """
         self.feature_dataset = feature_dataset
-        self.place_name = place_name
-        self.bound_box = bound_box
+        self.reference_place = reference_place
 
-        self.transit_agencies = []
+        self.place_name = reference_place.place_name
+        self.bound_box = reference_place.bound_box
+
+        self.snake_name = create_snake_name(self.reference_place)
         self.modes = modes
         self.gtfs_folders = None
 
-    def get_transit_agencies_for_place(self, geographic_scope: str, mode):
+        self.cache_folder = CacheFolder(self.snake_name)
+
+        # if no agencies are specified, will default to all agencies that serve the place
+        self.agencies_to_include = agencies_to_include
+        if self.agencies_to_include is None:
+            logging.info("a list of transit agencies to include was not specified so all agencies that serve the place"
+                         " will be used")
+            self.agencies_to_include = self.get_agencies_for_place()
+
+        # once the firs three methods have been run (get_agencies_for_place, get_gtfs_for_transit_agencies,
+        # unzip_gtfs_data), this dictionary will contain the paths of unzipped gtfs data available for place
+        # for desired Agencies
+        self.gtfs_folders = None
+        self.agency_feed_valid_dates = {}
+
+    # using requests instead of aihttp for this because only single request
+    def get_agencies_for_place(self):
+        """ Takes a place name of format 'city, state, country'
+        and returns a list of transit agencies that serve the place
+
+        :return: list[TransitAgency] | list of transit agencies (TransitAgencyObjects) that serve the place
         """
 
-        :param geographic_scope: what geographic scope to get transit agencies for. If using place name rather than
-        bounding box: {"place", "adjacent" (place plus all immediately adjacent places),
-        :param "network_extent" (specified
-        place plus all places served by any transit agency that also serves specified place) "msa", "csa"}
+        logging.info(f"Getting agencies that serve {self.place_name}")
+        # list of TransitAgency objects to be returned
+        agencies_for_place = []
+
+        # transit land's API only requires the city name (although this seems stupid)
+        place_short_name = self.reference_place.place_name.split(",")[0]  # fix so can use bounding box too
+        from gtfs_tools import transit_land_api_key
+        transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?api_key={transit_land_api_key}"
+                                             f"&city_name={place_short_name}")
+        transit_land_response.raise_for_status()
+        transit_land_data = transit_land_response.json()
+
+        # going through the agency dicts provided by the api and using them as kwargs for TransitAgency object
+        for agency_data in transit_land_data["agencies"]:
+            from gtfs_tools import TransitAgency
+            temp_agency = TransitAgency(**agency_data)
+            agencies_for_place.append(temp_agency)
+
+        # now can set self.agencies_that_serve_place
+        logging.info(f"Found {len(agencies_for_place)} agencies that serve {self.place_name}")
+        return agencies_for_place
+
+    def get_gtfs_for_transit_agencies(self):
+        """
+            Gets the latest static GTFS data for agencies desired.
+
+            :param agencies_to_include: list[TransitAgency] | list of transit agencies to get GTFS data for
+                (by default will be all agencies that serve the reference place)
+            :return: gtfs_zip_folders | dict with TransitAgencies as keys and
+             the (zipped) file names where the gtfs feeds are written as values.
+            :return: agency_feed_valid_dates: dict{TransitAgency: {"last_updated": MMDDYYYY, "valid_until": MMDDYYYY}}
+                | dictionary of the valid dates for each agency's feed and when it was last updated (because will have
+                to deal with feeds that are not current or currently valid.
+        """
+        # if a list of agencies to include was not provided then by default will use every transit agency serving place
+        logging.info(f"Getting GTFS data for {len(self.agencies_to_include)} transit agencies")
+        # outputs for the method
+        gtfs_zip_folders = {}
+
+
+        # next, iterating through the list of desired agencies and getting their data
+        for agency in self.agencies_to_include:
+            # onestop_id (used to query for feed) is in feed_version["feed"]["onestop_id"]
+            feed_version = agency.feed_version
+            onestop_id = feed_version["feed"]["onestop_id"]
+            transit_land_api_url = (f"https://transit.land/api/v2/rest/feeds/{onestop_id}/download_latest_feed_version"
+                                    f"?api_key={transit_land_api_key}")
+
+            # standard API query
+            response = requests.get(transit_land_api_url)
+            response.raise_for_status()
+
+            # the file path where the zipped gtfs data will be saved to (yes complicated, but best for organization
+            file_path = os.path.join(self.cache_folder.path, "gtfs_caches", f"{onestop_id}", "zipped_gtfs",
+                                     f"{onestop_id}.zip")
+
+            # set up folders in case they don't already exist
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            # writing the content that was returned from transit land to a zip file
+            with open(file_path, "wb") as gtfs_zipped_file:
+                gtfs_zipped_file.write(response.content)
+
+            # now need to see 1. when the feed was fetched (and that it's not too out of date) and 2. whether it's valid
+            feed_version_query_response = requests.get(f"https://transit.land/api/v2/rest/feeds/{onestop_id}"
+                                                       f"?api_key={transit_land_api_key}")
+            feed_version_query_response.raise_for_status()
+            feed_version_query_response_json = feed_version_query_response.json()
+
+            # when the latest static feed was fetched by transit land
+            latest_feed_fetch_date = (feed_version_query_response_json["feeds"][0]["feed_versions"]
+                                      [0]["fetched_at"])
+            # the latest date in the calendar that the data is valid for (can either extend or not use)
+            latest_feed_valid_until = (feed_version_query_response_json["feeds"][0]["feed_versions"]
+                                      [0]["latest_calendar_date"])
+
+            # adding the zipped gtfs folder to the path dict
+            gtfs_zip_folders[agency] = file_path
+            # creating a dictionary with these dates needed for each agency
+            self.agency_feed_valid_dates[agency] = {"last_updated": latest_feed_fetch_date,
+                                               "valid_until": latest_feed_valid_until}
+
+
+        logging.info("Successfully downloaded GTFS data for desired agencies")
+        return gtfs_zip_folders
+
+    def unzip_gtfs_data(self):
+        """
+        Unzips the GTFS data that was downloaded from Transit Land.
+        :return: unzipped_gtfs_filepaths: dict{TransitAgency: path of unzipped gtfs folder}
+        """
+        agency_zip_folders = self.get_gtfs_for_transit_agencies()
+        logging.info("Unzipping the downloaded GTFS data")
+        unzipped_gtfs_filepaths = {}
+
+        # go through each agency in the provided agnecy_zip_folders
+        for agency in agency_zip_folders:
+
+            # the path where each unzipped gtfs folder will be saved to
+            onestop_id_directory = os.path.dirname(os.path.dirname(agency_zip_folders[agency]))
+            unzipped_gtfs_filepath = os.path.join(onestop_id_directory,
+                                                  "unzipped_gtfs")
+
+            # set up folders in case they don't already exist
+            os.makedirs(unzipped_gtfs_filepath, exist_ok=True)
+
+            # using zipfile module to extract all .txt files provided
+            with ZipFile(agency_zip_folders[agency], "r") as zipped_file:
+                zipped_file.extractall(path=unzipped_gtfs_filepath)
+
+            # adding the unzipped gtfs folder to the path dict
+            unzipped_gtfs_filepaths[agency] = unzipped_gtfs_filepath
+
+        # set the gtfs_folders attribute and return the unzipped folder paths
+        self.gtfs_folders = unzipped_gtfs_filepaths
+        logging.info("Successfully unzipped the downloaded GTFS data")
+        return unzipped_gtfs_filepaths
+
+    def check_whether_data_valid(self):
+        """
+        Checks whether the data is valid for the desired agencies.
         :return:
         """
-        pass
+        logging.info("Checking whether the downloaded data is still valid (and can therefore be used to create a "
+                     "network dataset in ArcGIS)")
 
-    def get_gtfs_data(self, list_of_agencies):
-        pass
+        # a dictionary that says for each agency if the downloaded
+        still_valid_gtfs_data = {}
 
-    def create_transit_feature_classes(self):
-        # flesh out method
-        arcpy.transit.GTFSToPublicTransitDataModel(in_gtfs_folders=self.gtfs_folders,
+        for agency in self.agency_feed_valid_dates:
+            # check if current date is past the "valid_until" date
+            valid_until_date_iso = isodate.parse_date(self.agency_feed_valid_dates[agency]["valid_until"])
+            current_date_iso = isodate.parse_date(datetime.now().strftime("%Y-%m-%d-%f"))
+
+            if valid_until_date_iso <= current_date_iso:
+                logging.warning(f"The data for {agency.agency_name} is no longer valid (valid until {valid_until_date_iso})")
+            else:
+                still_valid_gtfs_data[agency] = True
+
+        logging.info(f"Data was valid for {len(still_valid_gtfs_data)}/{len(self.agency_feed_valid_dates)} agencies")
+        return still_valid_gtfs_data
+
+    def create_public_transit_data_model(self) -> None:
+        """
+        Creates a public transit data model in the feature dataset for this scenario using the valid GTFS data.
+        :return:  None
+        """
+
+
+        # only using valid gtfs data to create network dataset because otherwise gets screwy
+        valid_gtfs_data = self.check_whether_data_valid() # output of method is dict of transit agencies and validities
+        logging.info(f"Creating public transit data model for {self.place_name} using {len(valid_gtfs_data)} agencies")
+
+        gtfs_folders_to_use = []
+        for agency in valid_gtfs_data:
+            if valid_gtfs_data[agency]:
+                gtfs_folders_to_use.append(self.gtfs_folders[agency])
+
+        # create a Public Transit Data Model using arcpy
+        arcpy.transit.GTFSToPublicTransitDataModel(in_gtfs_folders=gtfs_folders_to_use,
                                                    target_feature_dataset=self.feature_dataset.path,
                                                    make_lve_shapes="MAKE_LVESHAPES")
 
+
     def connect_network_to_streets(self):
         # flesh out method
+        edges_fc_path = os.path.join(self.feature_dataset.path, "edges_fc")
         arcpy.transit.ConnectPublicTransitDataModelToStreets(target_feature_dataset=self.feature_dataset.path,
-                                                             in_streets_features=self.feature_dataset.street_network)
-
+                                                             in_streets_features=edges_fc_path)
 
 class NetworkDataset:
     """

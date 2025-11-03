@@ -7,7 +7,7 @@ import time
 
 # yes I know it's bad practice to use import * but in this case, I've made sure that it won't cause any problems
 # (can safely map namespace of create_network_dataset_oop to this module because were developed in tandem)
-from spare_cnd_oop import *
+from create_network_dataset_oop import *
 from gtfs_tools import *
 from general_tools import *
 import transit_data_for_arcgis
@@ -31,16 +31,16 @@ import arcpy_init
 
 class Place:
     """ Class that represents a place and contains methods to create network datasets for it"""
-    def __init__(self, arcgis_project:ArcProject, name=None, bound_box=None):
-        if name is None and bound_box is None:
+    def __init__(self, arcgis_project:ArcProject, place_name=None, bound_box=None):
+        if place_name is None and bound_box is None:
             raise ValueError("Must provide either a place or bounding box")
         # parameters
         self.arcgis_project = arcgis_project
-        self.name = name
+        self.place_name = place_name
         self.bound_box = bound_box
 
         # important attributes not passed
-        self.reference_place = ReferencePlace(place_name=self.name, bound_box=self.bound_box)
+        self.reference_place = ReferencePlace(place_name=self.place_name, bound_box=self.bound_box)
         self.snake_name = create_snake_name(self.reference_place)
         # cache folder for place
         self.cache_folder = CacheFolder(self.snake_name)
@@ -65,13 +65,16 @@ class Place:
                                           elevation_reset=False):                                # still need to figure out what to do with bounding box rather than place
         """
         Creates network dataset from for specified place using OSM street network data.
-        :param network_type | str:
-        :param use_elevation| bool:
-        :param full_reset:
+        :param network_type: str | {"walk", "drive", "bike", "transit"}
+        :param use_elevation: bool | whether to use elevation data for the streets in the network (in order to calculate
+            grade adjusted walk-times/bike-times
+        :param network_type: str |
+        :param use_elevation: bool |
+        :param full_reset: bool |
         :param elevation_reset:
         :return:
         """
-        logging.info(f"Creating network dataset for {self.name}")
+        logging.info(f"Creating network dataset for {self.reference_place.out_name}")
 
         if not use_elevation:
             # add no_z to network_type if not using elevation to work with network_types_attributes dict (see module)
@@ -81,7 +84,7 @@ class Place:
             network_type += "_z"
 
         # create StreetNetwork object for this place
-        street_network_for_place = StreetNetwork(self.name, network_type=network_type)
+        street_network_for_place = StreetNetwork(self.reference_place, network_type=network_type)
 
         # prepare geodatabase and create feature dataset
         geodatabase_for_place = GeoDatabase(self.arcgis_project, street_network=street_network_for_place)
@@ -109,13 +112,18 @@ class Place:
             # worth using reset here just to be safe because still need to debug
             street_feature_classes_for_place = StreetFeatureClasses(feature_dataset_for_place, street_network_for_place,
                                                                     use_elevation=True,
-                                                                    reset=True)
+                                                                    reset=full_reset)
 
         # setting up empty street feature classes (edges_fc and nodes_fc), then populating them, then caching them
         street_feature_classes_for_place.create_empty_feature_classes()
         street_feature_classes_for_place.add_street_network_data_to_feature_classes()
-        street_feature_classes_for_place.save_street_feature_classes_to_shapefile()
 
+        # if using transit then need to create a Transit Network and get it setup
+        if "transit" == network_type[:7]:
+            transit_network_for_place = TransitNetwork(feature_dataset_for_place, self.reference_place)
+            transit_network_for_place.unzip_gtfs_data()
+            transit_network_for_place.create_public_transit_data_model()
+            transit_network_for_place.connect_network_to_streets()
 
         # create and build network dataset from streets feature classes
         network_dataset_for_place = NetworkDataset(feature_dataset_for_place, network_type=network_type,
@@ -135,7 +143,7 @@ class Place:
 
         # transit land's API only requires the city name (although this seems stupid)
         place_short_name = self.reference_place.place_name.split(",")[0]                                                    # fix so can use bounding box too
-        transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?api_key={transit_land_api_key}"
+        transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?apikey={transit_land_api_key}"
                                              f"&city_name={place_short_name}")
         transit_land_response.raise_for_status()
         transit_land_data = transit_land_response.json()
@@ -175,8 +183,8 @@ class Place:
 if __name__ == "__main__":
     arc_package_project = ArcProject("network_dataset_package_project")
     arc_package_project.set_up_project()
-    test_place = Place(arc_package_project, "Cincinnati, Ohio, USA")
-    test_place.create_network_dataset_from_place(network_type="walk",
-                                                 use_elevation=True, full_reset=True, elevation_reset=True)
+    test_place = Place(arc_package_project, place_name="Chicago, Illinois, USA")
+    test_place.create_network_dataset_from_place(network_type="transit", use_elevation=False)
+
 
 

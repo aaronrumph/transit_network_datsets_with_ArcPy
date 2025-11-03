@@ -29,7 +29,17 @@ class ReferencePlace:
         """
         self.place_name = place_name
         self.bound_box = bound_box
+
+        """ 
+        Using plus codes as a way to represent the bounding box provided. This is mostly done to shorten file names. 
+        The downside is that 1. Plus codes are not as legible as coordinates (I know that SF, for instance, is around 37
+        something degrees north), and 2. Plus codes can be longer than the bounding box coordinates (e.g. SF is around
+        12 characters long, while the bounding box coordinates are around 11 characters long). But better to have a 
+        standardized way of doing it than to have a mix of formats and plus codes are shorter in cases where precise 
+        coordinates are used.
+        """
         self.plus_codes_for_bbox_corners:list = []
+        self.out_name:str = ""
 
         # check that either a bound box or a place name has been provided:
         if self.place_name is None and self.bound_box is None:
@@ -38,7 +48,8 @@ class ReferencePlace:
         # this part is just exception handling because everything else follows from this, so need correct ReferencePlace
         # first checking that bound_box was provided
         if self.bound_box is not None:
-
+            # det out name to reflect bounding box
+            self.out_name = f"Bounding box: {self.bound_box}"
             # check if ALL the provided values for the bbox were floats
             if all(isinstance(coord, float) for coord in self.bound_box):
             # in case the bounding box is not in the correct format (aka, if floats passed instead), rewrite it
@@ -51,7 +62,6 @@ class ReferencePlace:
                 if not isinstance(coord, str):
                     # since already converted bbox from floats to strs (if was floats), just raise error for other types
                         raise ValueError("Bounding box coordinates must be given as strings")
-
 
                 # easy check first to see that coordinate in bounding box does not contain bad characters
                 if not re.match(r"-?\d+(?:\.\d+)?", coord):
@@ -70,6 +80,10 @@ class ReferencePlace:
 
             # if have made it this far without an error then bound box is safe to use and can now create plus codes
             self.create_plus_codes_for_bbox()
+
+        # place name was provided but no bound box
+        else:
+            self.out_name = f"Place:{self.place_name}"
 
     def create_plus_codes_for_bbox(self):
         """
@@ -119,8 +133,9 @@ def create_snake_name(name:str | ReferencePlace):
     elif isinstance(name, ReferencePlace):
         # in case where bounding box is not provided
         if name.bound_box is None:
-            return name.place_name.replace(" ", "_").replace(
+            concatenated_place_name = name.place_name.replace(" ", "_").replace(
                                             ",", "").replace(r"/", "").lower()
+            return concatenated_place_name
 
         # in case where bounding box is given but place name is not
         elif name.bound_box is None:
