@@ -30,12 +30,14 @@ import platform
 import isodate
 from datetime import datetime
 from zipfile import ZipFile
+import random
 
 # local module(s)
 import transit_data_for_arcgis
 import network_types
 from general_tools import *
 from gtfs_tools import *
+from gtfs_tools import transit_land_api_key
 
 # making sure that using windows because otherwise cannot use arcpy and ArcGIS
 if platform.system() != "Windows":
@@ -47,7 +49,7 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # osmnx setup
-ox.settings.timeout = 1000
+ox.settings.timeout = 3000
 ox.settings.max_query_area_size = 5000000000000
 ox.settings.use_cache = True
 
@@ -80,7 +82,7 @@ class ArcProject:
         self.maps = []
         self.layouts = []
         self.project_file = self.path
-        self.arcObject = arcpy.mp.ArcGISProject(self.path)
+        self.arcObject = None
 
     # method to create project if doesn't already exist, and to activate project
     def set_up_project(self):
@@ -92,8 +94,10 @@ class ArcProject:
             self.path | str
         """
         if arcpy.Exists(self.path):
+            logging.info("Project already exists, opening it")
             self.arcObject = arcpy.mp.ArcGISProject(self.path)
         else:
+            logging.info("Project does not exist, creating it")
             os.makedirs(self.project_dir_path)
             arcgis_project_template.saveACopy(self.path)
             self.arcObject = arcpy.mp.ArcGISProject(self.path)
@@ -103,6 +107,19 @@ class ArcProject:
         return self.path
     # add more methods here. Add map, etc.
 
+    def save_project(self):
+        """Saves the arcproject"""
+        try:
+            # have to release the project file so can save????/
+            del self.arcObject
+            # reopen the project
+            self.arcObject = arcpy.mp.ArcGISProject(self.path)
+            # and now can save it
+            self.arcObject.save()
+            logging.info("Project saved and reopened successfully")
+
+        except OSError as e:
+            logging.warning(f"Could not save project (file may locked or project open: {e}")
 
 # global functions needed at global level to do multiprocessing for API queries
 def init_worker(counter, lock):
@@ -140,6 +157,58 @@ def check_network_analyst_extension_back_in():
         raise Exception("Network Analyst extension is not checked out")
 
 
+def add_points_arcgis(feature_dataset_path: str, fc_name: str, point_coordinates: tuple | list[tuple]) -> str:
+    """
+    Adds points to a feature class in a feature dataset
+    :param feature_dataset_path: str
+    :param fc_name: str
+    :param point_coordinates: tuple | list[tuple]
+    :return: str | fc_path (the path to the feature class where the points were added)
+    """
+    # fc_path
+    fc_path = os.path.join(feature_dataset_path, fc_name)
+
+    # check to make sure valid (lat, lon) points provided
+    if isinstance(point_coordinates, list):
+        for point in point_coordinates:
+            check_if_valid_coordinate_point(point)
+    elif isinstance(point_coordinates, tuple):
+        check_if_valid_coordinate_point(point_coordinates)
+    else:
+        raise Exception("Invalid point coordinates provided")
+
+    # by default will overwrite existing feature class with same name in same loc (low risk of accidental collision)
+    arcpy.env.overwriteOutput = True
+    # create empty feature class
+    arcpy.management.CreateFeatureclass(out_path=feature_dataset_path, out_name=fc_name, geometry_type="POINT",
+                                        spatial_reference=arcpy.SpatialReference(4326))
+    # fields for feature class
+    fields = ["SHAPE@XY"]
+
+    # in case where list of points provided, add each one
+    if isinstance(point_coordinates, list):
+        with arcpy.da.InsertCursor(fc_path, fields) as cursor:
+            for point in point_coordinates:
+                # flip to be (x, y) rather than lat, lon (y, x)
+                lat, lon = point[0], point[1]
+                point_xy = (lon, lat)
+
+                # insert point_xy
+                cursor.insertRow([point_xy])
+
+    # in case where single point provided, add it
+    elif isinstance(point_coordinates, tuple):
+        with arcpy.da.InsertCursor(fc_path, fields) as cursor:
+            # flip to be (x, y) rather than lat, lon (y, x)
+            lat, lon = point[0], point[1]
+            point_xy = (lon, lat)
+
+            # insert point_xy
+            cursor.insertRow([point_xy])
+
+    return fc_path
+
+
 class CacheFolder:
     """ Class for cache folder, takes param
         network_snake_name: str (MUST be in snake case) which will be the name of cache folder
@@ -157,10 +226,10 @@ class CacheFolder:
                 osm data and elevation data
     """
 
-    def __init__(self, network_snake_name):
-        self.network_snake_name = network_snake_name
+    def __init__(self, snake_name_with_scope):
+        self.snake_name_with_scope = snake_name_with_scope
         self.env_dir_path = Path(__file__).parent
-        self.path = os.path.join(self.env_dir_path, "place_caches", f"{self.network_snake_name}_cache")
+        self.path = os.path.join(self.env_dir_path, "place_caches", f"{self.snake_name_with_scope}_cache")
 
     def check_if_cache_folder_exists(self):
         """ Returns True if cache folder already exists for the city."""
@@ -172,14 +241,14 @@ class CacheFolder:
     def set_up_cache_folder(self):
         """Return True if there is already a cache folder for city. If not, creates one."""
         if os.path.exists(self.path):
-            raise Exception(f"There is already a cache folder for {self.network_snake_name}")
+            raise Exception(f"There is already a cache folder for {self.snake_name_with_scope}")
         else:
             os.makedirs(self.path)
 
     def reset_cache_folder(self):
         # completely reset the cache folder for the city
         if not os.path.exists(self.path):
-            raise Exception(f"Cannot reset the cache folder for {self.network_snake_name} "
+            raise Exception(f"Cannot reset the cache folder for {self.snake_name_with_scope} "
                             f"because no such folder exists"
                             )
         else:
@@ -232,11 +301,14 @@ class StreetNetwork:
     Class representing street network for a location
 
     Attributes:
-        city_name (str): Name of the city
-
+        geographic_scope (str): Geographic scope of the street network {"city", "msa", "csa"}
+        reference_place_list: list of reference places to get network for (len will be one if using city limits, other-
+        wise, will contain all the places in the MSA if MSA desired and in CSA if CSA desired)
         network_type (str): type of network being created {"walk_no_z", "walk_z", "bike_no_z", "bike_z",
+        
+        Local attributes:
         "transit_no_z", "transit_z", "drive", "transit_plus_biking_no_z", "transit_plus_biking_z"}
-        bound_box (list): Bounding box of the city
+        bound_boxes (list): Bounding boxes passed (if bounding box used, len of list will be one)
         snake_name (str): Snake name of the city
         cache_folder (CacheFolder): Cache folder for the street network
         graph_cache (Cache): Cache for the street network graph
@@ -253,19 +325,26 @@ class StreetNetwork:
             from cache
     """
 
-    def __init__(self, reference_place: ReferencePlace, network_type="walk_no_z"):
+    def __init__(self, geographic_scope: str, reference_place_list: list[ReferencePlace], network_type="walk_no_z"):
         #### need to make __init__ method cleaner ####
-        self.reference_place = reference_place
+        self.geographic_scope = geographic_scope
+        self.reference_place_list = reference_place_list
         self.network_type = network_type
 
         # get place name and bbox out of reference place
-        self.place_name = reference_place.place_name
-        self.bound_box = reference_place.bound_box
+        self.place_names = [reference_place.place_name for reference_place in reference_place_list]
+        self.bound_boxes = [reference_place.bound_box for reference_place in reference_place_list]
+        self.main_reference_place = reference_place_list[0]
 
-        # create snake name for StreetNetwork
-        self.snake_name = create_snake_name(self.reference_place)
+        if self.main_reference_place.bound_box:
+            self.geographic_scope = "bbox"
+
+        # create snake name for StreetNetwork (the first item in the list is always the main place)
+        self.snake_name = create_snake_name(self.main_reference_place)
+        # create snake name with geographic scope encoded
+        self.snake_name_with_scope = f"{self.snake_name}_{self.geographic_scope}"
         # link cache folder
-        self.cache_folder = CacheFolder(self.snake_name)
+        self.cache_folder = CacheFolder(self.snake_name_with_scope)
         # decode the network type into proper network type designation for osmnx query
         self.osmnx_type = network_types.network_types_attributes[self.network_type]["osmnx_network_type"]
 
@@ -302,13 +381,43 @@ class StreetNetwork:
             logging.info("Getting street network from OSM")
 
             # if using city, getting OSM data if not using cache or if no cache exists
-            if self.bound_box is None:
-                network_graph = ox.graph_from_place(self.place_name, network_type=self.osmnx_type, retain_all=True)
+            if self.main_reference_place.bound_box is None:
+
+                # if there is more than one reference place (not using city limits) need to combine street networks
+                if len(self.reference_place_list) > 1:
+                    network_graphs = [] # list of the networkx graph objects representing city street networks
+                    for reference_place in self.reference_place_list:
+                        logging.info(f"Getting street network for {reference_place.pretty_name}")
+
+                        # getting each indiviudal graph one at a time first
+                        single_network_graph = ox.graph_from_place(reference_place.place_name,
+                                                            network_type=self.osmnx_type, retain_all=True)
+                        # add each individual graph to the list so can combine
+                        network_graphs.append(single_network_graph)
+
+                    logging.info("Combining street networks")
+                    # using compose all to combine the various street grids
+                    network_graph = nx.compose_all(network_graphs)
+
+                # when using city limits, only need street grid for main place
+                elif len(self.reference_place_list) == 1:
+                    logging.info(f"Getting street network for {self.main_reference_place.pretty_name} city proper")
+                    network_graph = ox.graph_from_place(self.main_reference_place.place_name,
+                                                        network_type=self.osmnx_type, retain_all=True)
+
+                else:
+                    raise Exception("Cannot get street network because no place was specified")
+                
+                # turn graph into gdfs
                 network_nodes, network_edges = ox.graph_to_gdfs(network_graph, nodes=True, edges=True)
+
 
             # if using bound box, getting OSM Data
             else:
-                network_graph = ox.graph_from_bbox(self.bound_box, network_type=self.osmnx_type, retain_all=True)
+                logging.info(f"Getting street network for {self.main_reference_place.pretty_name}")
+                network_graph = ox.graph_from_bbox(bbox=self.main_reference_place.bound_box,
+                                                   network_type=self.osmnx_type, retain_all=True)
+                # again graph to gdfs
                 network_nodes, network_edges = ox.graph_to_gdfs(network_graph, nodes=True, edges=True)
 
         # otherwise using cached data
@@ -320,9 +429,13 @@ class StreetNetwork:
         # just because I want to keep track of everything
         if timer_on:
             logging.info(f"Got street network from OSM in {time.perf_counter() - process_start_time} seconds")
-            logging.info(f"Street network for {self.place_name} had {len(network_nodes)} nodes and "
+            logging.info(f"Street network for {self.main_reference_place.place_name} {self.geographic_scope} had "
+                         f"{len(network_nodes)} nodes and "
                          f"{len(network_edges)} edges")
 
+        self.graph_cache.write_cache_data(network_graph)
+        self.nodes_cache.write_cache_data(network_nodes)
+        self.edges_cache.write_cache_data(network_edges)
         self.network_graph, self.network_nodes, self.network_edges = network_graph, network_nodes, network_edges
         return network_graph, network_nodes, network_edges
 
@@ -460,10 +573,14 @@ class ElevationMapper:
     # this method is the main method that actually sends out for the elevation data, and then adds it to street network
     def add_elevation_data_to_nodes(self):
 
-        logging.info(f"Adding elevation to the street network for {self.street_network.place_name}")
+        logging.info(f"Adding elevation to the street network for "
+                     f"{self.street_network.main_reference_place.place_name} {self.street_network.geographic_scope}")
 
-        # run the async function to get the elevation data for all the nodes
-        elevation_data = asyncio.run(self.get_all_elevation_data())
+        if not self.reset and self.elevation_cache.check_if_cache_already_exists():
+            elevation_data = self.elevation_cache.read_cache_data()
+        else:
+            # run the async function to get the elevation data for all the nodes
+            elevation_data = asyncio.run(self.get_all_elevation_data())
 
         # make list of elevations
         z_values:list = [elevation_data.get(idx) for idx in elevation_data]
@@ -498,7 +615,8 @@ class ElevationMapper:
         number_of_edges_without_elevation_data = 0
 
         process_start_time = time.perf_counter()
-        logging.info(f"Adding grades to edges for {self.street_network.snake_name} street network")
+        logging.info(
+            f"Adding grades to edges for {self.street_network.main_reference_place.pretty_name} street network")
 
         # doubled check street network is elevation enabled
         if not self.street_network.elevation_enabled:
@@ -546,16 +664,34 @@ class GeoDatabase:
         self.project = arcgis_project
         self.street_network = street_network
         self.project_file_path = arcgis_project.path
-        self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.street_network.snake_name}.gdb")
+        self.gdb_name = self.street_network.snake_name_with_scope
+        self.gdb_path = os.path.join(self.project.project_dir_path, f"{self.gdb_name}.gdb")
 
     def save_gdb(self):
         # using try to avoid errors in case of file lock
         try:
-            self.project.arcObject.defaultGeodatabase = self.gdb_path
-            self.project.arcObject.save()
-            logging.info("Project saved successfully")
+            # save the project
+            self.project.save_project()
+
+            # now can update the list of geodatabases and set created one as the default
+
+            # get the list of dictionaries representing the databases in the project
+            gdb_dictionary_for_adding = {"databasePath": self.gdb_path, "isDefaultDatabase": True}
+            # get current list of gdbs for project
+            current_gdbs = self.project.arcObject.databases
+            # go through and make sure that none of the current gdbs will be default
+            for gdb_dict in current_gdbs:
+                gdb_dict["isDefaultDatabase"] = False
+            # add geodatabase instance to project and update
+            current_gdbs.append(gdb_dictionary_for_adding)
+            self.project.arcObject.updateDatabases(current_gdbs)
+
+            # housekeeping
+            logging.info("Project saved successfully and default geodatabase set")
+
+        # will get OSError if not allowed to save because of lock
         except OSError as e:
-            logging.warning(f"Could not save project (file may locked or project open: {e}")
+            logging.warning(f"Could not save project (file may locked or project open: {e})")
 
     def set_up_gdb(self, reset=False):
         """ Creates geodatabase if one does not exist, and resets it if reset desired."""
@@ -566,31 +702,48 @@ class GeoDatabase:
 
         if not reset and not arcpy.Exists(self.gdb_path):
             logging.info("No existing geodatabase found, creating new geodatabase")
-            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
 
         elif arcpy.Exists(self.gdb_path):
             arcpy.Delete_management(self.gdb_path)
             arcpy.overwriteOutput = True
-            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
 
         else:
-            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.street_network.snake_name)
+            arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
 
         # modifying current arcpy env
         arcpy.env.workspace = self.gdb_path
         # just setting current gdb as default. need to debug to figure out why have to do this way
         self.project.arcObject.defaultGeodatabase = self.gdb_path
-
         # save project to make sure that default gdb actually gets set
         self.save_gdb()
 
 class FeatureDataset:  # add scenario_id so can do multiple scenarios of same network type
-    def __init__(self, gdb: GeoDatabase, street_network: StreetNetwork, network_type: str = "walk_no_z", reset=False):
+    """
+        The feature dataset is a container for various feature classes, and is where the network dataset will go.
+        
+        Attributes:
+            gdb (GeoDatabase): The geodatabase where the feature dataset will be created.
+            street_network (StreetNetwork): The street network that will be used to create the feature dataset.
+            scenario_id (str): The ID of the scenario that the feature dataset will be created for.
+            network_type (str): The type of network that the feature dataset will be created for.
+            reset (bool): Whether to reset the feature dataset if it already exists.
+            name (str): The name of the feature dataset.
+            path (str): The path to the feature dataset.
+            
+        Methods:
+            create_feature_dataset(): Creates the feature dataset.
+            reset_feature_dataset(): Resets the feature dataset.
+    """
+    
+    def __init__(self, gdb: GeoDatabase, street_network: StreetNetwork, scenario_id:str, network_type: str = "walk_no_z", reset=False):
         self.gdb = gdb
         self.street_network = street_network
+        self.scenario_id = scenario_id
         self.network_type = network_type
         self.reset = reset
-        self.name = f"{self.network_type}_fd"
+        self.name = f"{self.network_type}_{scenario_id}_fd"
         self.path = os.path.join(self.gdb.gdb_path, f"{self.name}")
 
         # if reset true, then overwrite existing features
@@ -893,31 +1046,43 @@ class StreetFeatureClasses:
         arcpy.env.overwriteOutput = False  # setting overwrite output back to false so no accidental overwriting
 
 class TransitNetwork:
-    def __init__(self, feature_dataset: FeatureDataset, reference_place: ReferencePlace,
+    def __init__(self, geographic_scope, feature_dataset: FeatureDataset, reference_place_list: list[ReferencePlace],
                  modes: list = None, agencies_to_include:list[TransitAgency]=None):
         """
         Transit network class for place
-        :param place_name: str | name of the place
-        :param modes: list | modes to be included in the transit network {"all", "bus", "heavy_rail", "light_rail",
-        "regional_rail", "ferry", "gondola", "funicular", "trolleybus", "monorail"}
-        (for more, see gtfs_tools.route_types documentation)
+        
+        Attributes:
+            geographic_scope: GeographicScope | geographic scope of the transit network {"city", "msa", "csa"}
+            feature_dataset: FeatureDataset | feature dataset where the transit network will be created
+            reference_place_list: list[ReferencePlace] | list of reference places for the transit network
+            modes: list | modes to be included in the transit network {"all", "bus", "heavy_rail", "light_rail",
+            "regional_rail", "ferry", "gondola", "funicular", "trolleybus", "monorail"}
+            (for more, see gtfs_tools.route_types documentation)
 
         **Methods:**
             get_transit_agencies_for_place: creates a list of transit agencies that serve place (see method doc)
 
 
         """
+        self.geographic_scope = geographic_scope
         self.feature_dataset = feature_dataset
-        self.reference_place = reference_place
+        self.reference_place_list = reference_place_list
+    
+        self.place_names = [reference_place.place_name for reference_place in reference_place_list]
+        self.bound_box = [reference_place.bound_box for reference_place in reference_place_list]
+        self.main_reference_place = reference_place_list[0]
 
-        self.place_name = reference_place.place_name
-        self.bound_box = reference_place.bound_box
+        if self.main_reference_place.bound_box:
+            self.geographic_scope = "bbox"
 
-        self.snake_name = create_snake_name(self.reference_place)
+        self.snake_name = create_snake_name(self.main_reference_place)
+        self.snake_name_with_scope = f"{self.snake_name}_{self.geographic_scope}"
         self.modes = modes
+        # eventually this is what will be used to pass gtfs data to create network dataset
         self.gtfs_folders = None
 
-        self.cache_folder = CacheFolder(self.snake_name)
+        # link to cache folder
+        self.cache_folder = CacheFolder(self.snake_name_with_scope)
 
         # if no agencies are specified, will default to all agencies that serve the place
         self.agencies_to_include = agencies_to_include
@@ -926,7 +1091,7 @@ class TransitNetwork:
                          " will be used")
             self.agencies_to_include = self.get_agencies_for_place()
 
-        # once the firs three methods have been run (get_agencies_for_place, get_gtfs_for_transit_agencies,
+        # once the first three methods have been run (get_agencies_for_place, get_gtfs_for_transit_agencies,
         # unzip_gtfs_data), this dictionary will contain the paths of unzipped gtfs data available for place
         # for desired Agencies
         self.gtfs_folders = None
@@ -934,32 +1099,58 @@ class TransitNetwork:
 
     # using requests instead of aihttp for this because only single request
     def get_agencies_for_place(self):
-        """ Takes a place name of format 'city, state, country'
+        """
+        Takes a place name of format 'city, state, country'
         and returns a list of transit agencies that serve the place
 
         :return: list[TransitAgency] | list of transit agencies (TransitAgencyObjects) that serve the place
         """
-
-        logging.info(f"Getting agencies that serve {self.place_name}")
+        logging.info(f"Getting agencies that serve {self.main_reference_place.pretty_name}")
         # list of TransitAgency objects to be returned
         agencies_for_place = []
 
-        # transit land's API only requires the city name (although this seems stupid)
-        place_short_name = self.reference_place.place_name.split(",")[0]  # fix so can use bounding box too
-        from gtfs_tools import transit_land_api_key
-        transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?api_key={transit_land_api_key}"
-                                             f"&city_name={place_short_name}")
-        transit_land_response.raise_for_status()
-        transit_land_data = transit_land_response.json()
+        # in case where using place (with geographic scope) rather than bounding box
+        if self.main_reference_place.bound_box is None:
 
-        # going through the agency dicts provided by the api and using them as kwargs for TransitAgency object
-        for agency_data in transit_land_data["agencies"]:
-            from gtfs_tools import TransitAgency
-            temp_agency = TransitAgency(**agency_data)
-            agencies_for_place.append(temp_agency)
+            # iterate through reference places to get the agencies that serve them
+            for reference_place in self.reference_place_list:
+                # transit land's API only requires the city name (although this seems stupid)
+                place_short_name = reference_place.place_name.split(",")[0]
+
+                transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?api_key="
+                                                     f"{transit_land_api_key}"
+                                                     f"&city_name={place_short_name}")
+                transit_land_response.raise_for_status()
+
+                # json containing the agencies
+                transit_land_data = transit_land_response.json()
+
+                # going through the agency dicts provided by the api and using them as kwargs for TransitAgency object
+                for agency_data in transit_land_data["agencies"]:
+                    # fill out TransitAgency objects using the data from the API
+                    temp_agency = TransitAgency(**agency_data)
+                    agencies_for_place.append(temp_agency)
+                logging.info(f"Found {len(agencies_for_place)} agencies that serve {reference_place.pretty_name}"
+                             f" {self.geographic_scope}")
+
+        # in case where using bounding box
+        else:
+            # the bbox is concatenated into a string to be used in the query to transitland's API
+            bbox_query_string = ",".join(self.main_reference_place.bound_box)
+            transit_land_response = requests.get(f"https://transit.land/api/v2/rest/agencies?api_key="
+                                                 f"{transit_land_api_key}"
+                                                 f"&bbox={bbox_query_string}")
+            transit_land_response.raise_for_status()
+            transit_land_data = transit_land_response.json()
+
+            for agency_data in transit_land_data["agencies"]:
+                # fill out TransitAgency objects using the data from the API
+                temp_agency = TransitAgency(**agency_data)
+                agencies_for_place.append(temp_agency)
+
+            logging.info(f"Found {len(agencies_for_place)} agencies that serve {self.main_reference_place.pretty_name}")
 
         # now can set self.agencies_that_serve_place
-        logging.info(f"Found {len(agencies_for_place)} agencies that serve {self.place_name}")
         return agencies_for_place
 
     def get_gtfs_for_transit_agencies(self):
@@ -1035,7 +1226,7 @@ class TransitNetwork:
         logging.info("Unzipping the downloaded GTFS data")
         unzipped_gtfs_filepaths = {}
 
-        # go through each agency in the provided agnecy_zip_folders
+        # go through each agency in the provided agency_zip_folders
         for agency in agency_zip_folders:
 
             # the path where each unzipped gtfs folder will be saved to
@@ -1056,6 +1247,7 @@ class TransitNetwork:
         # set the gtfs_folders attribute and return the unzipped folder paths
         self.gtfs_folders = unzipped_gtfs_filepaths
         logging.info("Successfully unzipped the downloaded GTFS data")
+
         return unzipped_gtfs_filepaths
 
     def check_whether_data_valid(self):
@@ -1091,17 +1283,19 @@ class TransitNetwork:
 
         # only using valid gtfs data to create network dataset because otherwise gets screwy
         valid_gtfs_data = self.check_whether_data_valid() # output of method is dict of transit agencies and validities
-        logging.info(f"Creating public transit data model for {self.place_name} using {len(valid_gtfs_data)} agencies")
+        logging.info(f"Creating public transit data model for {self.main_reference_place.pretty_name} using "
+                     f"{len(valid_gtfs_data)} agencies")
 
         gtfs_folders_to_use = []
         for agency in valid_gtfs_data:
             if valid_gtfs_data[agency]:
                 gtfs_folders_to_use.append(self.gtfs_folders[agency])
 
-        # create a Public Transit Data Model using arcpy
+        # create a Public Transit Data Model using arcpy (using interpolate because some minor agencies have low quality
+        # GTFS data, and while this is annoying, you  can just calculate arrival times using interpolate
         arcpy.transit.GTFSToPublicTransitDataModel(in_gtfs_folders=gtfs_folders_to_use,
                                                    target_feature_dataset=self.feature_dataset.path,
-                                                   make_lve_shapes="MAKE_LVESHAPES")
+                                                   interpolate="INTERPOLATE", make_lve_shapes="MAKE_LVESHAPES")
 
 
     def connect_network_to_streets(self):
@@ -1162,7 +1356,7 @@ class NetworkDataset:
         """
         process_start_time = time.perf_counter()
         logging.info(
-            f"Creating {self.network_type} network dataset for {self.street_network.snake_name}")  # change so looks better (use short name rather than snake name)
+            f"Creating {self.network_type} network dataset for {self.street_network.main_reference_place.pretty_name}")  
 
         # making sure network analyst checked out
         if not network_analyst_extension_checked_out:
@@ -1173,12 +1367,13 @@ class NetworkDataset:
             raise Exception(f"Cannot create new network dataset {self.name} because one already exists"
                             f"with that name at the desired path {self.path}")
 
-        # main code block for the actual creating of the network dataset                                                   # currently starting with just walking network dataset but will eventually add support for transit (+ biking?)
+        # main code block for the actual creating of the network dataset   
         try:
             if self.reset:
                 arcpy.Delete_management(self.path)
                 logging.info(
-                    f"Existing network dataset {self.name} for {self.street_network.snake_name}")  # again replace snake name with short name
+                    f"Existing network dataset {self.name} for {self.street_network.main_reference_place.pretty_name}"
+                    f" {self.street_network.geographic_scope} already exists, deleting and creating new")  
 
             # check whether to use elevation in network dataset, raise error if no elevation data
             if self.use_elevation:
@@ -1198,8 +1393,7 @@ class NetworkDataset:
 
             # mark that has been created
             self.has_been_created = True
-            logging.info(
-                f"Successfully created network dataset in {time.perf_counter() - process_start_time} seconds")
+            logging.info(f"Successfully created network dataset in {time.perf_counter() - process_start_time} seconds")
             return self.path
 
         finally:
@@ -1228,6 +1422,9 @@ class NetworkDataset:
             check_network_analyst_extension_back_in()
         process_run_time = time.perf_counter() - process_start_time
         logging.info(f"Network dataset successfully built in {process_run_time} second")
+
+        # save the gdb?
+        self.feature_dataset.gdb.save_gdb()
         return self.path
 
 

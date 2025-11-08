@@ -2,8 +2,18 @@
 This module contains helpful helper functions that can be used in any given module with no circular import
 problems
 """
+import base64
+import logging
+import random
 import re
 import pluscodes
+import requests
+
+# getting API key from .env file
+import os
+from dotenv import load_dotenv
+load_dotenv("api_keys.env")
+census_bureau_api_key = os.getenv("CENSUS_BUREAU_API_KEY")
 
 
 # regex matching patterns for use in checking other stuff
@@ -29,6 +39,12 @@ class ReferencePlace:
         """
         self.place_name = place_name
         self.bound_box = bound_box
+
+        if self.bound_box:
+            self.pretty_name = self.bound_box
+        else:
+            self.pretty_name = self.place_name
+
 
         """ 
         Using plus codes as a way to represent the bounding box provided. This is mostly done to shorten file names. 
@@ -151,8 +167,262 @@ def create_snake_name(name:str | ReferencePlace):
     else:
         raise ValueError("Name must be either a string or a ReferencePlace instance")
 
+def get_reference_places_for_scope(place_name:str, geographic_scope:str):
+    """
+    using nested functions because I am tired and want to
+    """
+
+    logging.info(f"Getting reference places for {place_name} {geographic_scope}")
+    # first can just return city proper if try passing "city" as scope
+    if geographic_scope == "city":
+        return [ReferencePlace(place_name)]
+
+    def get_lat_lon(place_name: str):
+        """
+        This function takes a place name (like "San Francisco, California, USA") and returns a list of ReferencePlaces
+        corresponding to places in the same MSA as the place given.
+        :param place_name:
+        :return:
+        """
+
+        # first get the lat and lon of the place using the nominatim api
+        nominatim_url = "https://nominatim.openstreetmap.org/search"
+        # q is unspecified query
+        nominatim_params = {
+            "q": place_name,
+            "limit": "10",
+            "format": "json"}
+        # need to give valid User-Agent header
+        nominatim_headers = {"User-Agent": "Network_Datasets"}
+
+        # now get response from API
+        nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
+        nominatim_response.raise_for_status()
+        nominatim_data = nominatim_response.json()
+
+        # extract lat and lon from response
+        place_lat = nominatim_data[0]["lat"]
+        place_lon = nominatim_data[0]["lon"]
+        place_lat_lon:dict = {"lat": place_lat, "lon": place_lon}
+
+        return place_lat_lon
+
+    # the url for the geocoding API
+    census_bureau_geocoding_url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+
+    # now that have lat and lon in place, can get MSA (and state) geoids using Census geocoder
+    def get_msa_from_lat_lon(place_lat_lon:dict):
+        """
+
+        :param place_lat_lon:
+        :return: geoids | {"msa_geoid": msa_geoid, "state_geoid": state_geoid}
+        """
+        # using the Census Bureau's geocoding API because free and gives geoids back getting msa geoid and state geoid
+        census_bureau_geocoding_params = {
+            "x": place_lat_lon["lon"],
+            "y": place_lat_lon["lat"],
+            "format": "json",
+            "benchmark": "Public_AR_Current",   # just the weird current version shorthand
+            "vintage": "4",                     # same as above
+            "layers": "93,80"}  # 93 is the layer code for MSA and 80 is the layer code for state
+
+        census_bureau_response = requests.get(census_bureau_geocoding_url, params=census_bureau_geocoding_params)
+        census_bureau_response.raise_for_status()
+
+        # take response json data and use to po
+        census_bureau_data = census_bureau_response.json()
+        returned_geographies = census_bureau_data["result"]["geographies"]
+
+        # get state geoid out of returned geographies
+        state_geoid = returned_geographies["States"][0]["GEOID"]
+        # can safely use first result because msas are mutually exclusive
+        msa_geoid = returned_geographies["Metropolitan Statistical Areas"][0]["GEOID"]
+        # get state name out of returned geographies
+        state_name = returned_geographies["States"][0]["BASENAME"]
+
+        # returning a dict: {"msa_geoid": geoid (str), "state_geoid": geoid (str)}
+        geoids = {"msa_geoid": msa_geoid, "state_geoid": state_geoid, "state_name": state_name}
+        return geoids
+
+    # basically same function as above, just for csa
+    def get_csa_from_lat_lon(place_lat_lon:dict):
+        census_bureau_geocoding_params = {
+            "x": place_lat_lon["lon"],
+            "y": place_lat_lon["lat"],
+            "format": "json",
+            "benchmark": "Public_AR_Current",   # just the weird current version shorthand
+            "vintage": "4",                     # same as above
+            "layers": "97,80"}  # 97 is csa code and 80 is state
+
+        census_bureau_response = requests.get(census_bureau_geocoding_url, params=census_bureau_geocoding_params)
+        census_bureau_response.raise_for_status()
+
+        # take response json data and use to po
+        census_bureau_data = census_bureau_response.json()
+        returned_geographies = census_bureau_data["result"]["geographies"]
+
+        # get state geoid out of returned geographies
+        state_geoid = returned_geographies["States"][0]["GEOID"]
+        # same thing here, can safely use first result because csas are mutually exclusive
+        csa_geoid = returned_geographies["Combined Statistical Areas"][0]["GEOID"]
+        # get state name out of returned geographies
+        state_name = returned_geographies["States"][0]["BASENAME"]
+
+
+        # returning a dict: {"msa_geoid": [msa_geoid_0...], "state_geoid": [state_geoid]}
+        geoids = {"csa_geoid": csa_geoid, "state_geoid": state_geoid, "state_name": state_name}
+        return geoids
+
+    def get_msas_from_csa(geoids:dict):
+
+        # the list of msa_geoid_dict dicts to return
+        msa_geoid_list = []
+
+        # get csa_geoid out of input
+        csa_geoid = geoids["csa_geoid"]
+        state_geoid = geoids["state_geoid"]
+        state_name = geoids["state_name"]
+
+        # the geoinfo census bureau api url needed for query
+        geoinfo_url = (f"https://api.census.gov/data/2023/geoinfo?get=NAME&for=metropolitan%20statistical%20area/"
+                       f"micropolitan%20statistical%20area:*&in=combined%20statistical%20area:{csa_geoid}"
+                       f"&key={census_bureau_api_key}")
+
+        # query the API
+        geoinfo_response = requests.get(geoinfo_url)
+        geoinfo_response.raise_for_status()
+        geoinfo_data = geoinfo_response.json()
+
+        # go through each msa returned (the first is always just the format so can skip)
+        for msa in geoinfo_data[1:]:
+            # just in case test to same msa[0] not "NAME"
+            if msa[0] != "NAME":
+                msa_geoid = msa[2]
+                msa_geoid_dict = {"msa_geoid": msa_geoid, "state_geoid": state_geoid, "state_name": state_name}
+                msa_geoid_list.append(msa_geoid_dict)
+
+        return msa_geoid_list
+
+    def get_counties_from_msa(msa_geoids:list[dict]):
+        """ Returns a set of county names (e.g. "Alameda County, California") for the msa provided"""
+
+        # the set of counties to return
+        counties_in_msa = set()
+        # iterating through msas provided
+        for msa in msa_geoids:
+            # get data out of the msa dict
+            msa_geoid = msa["msa_geoid"]
+            state_geoid = msa["state_geoid"]
+            state_name = msa["state_name"]
+
+            # easier to just define new url for each msa rather than try to set parameters with base url
+            geoinfo_counties_url = (f"https://api.census.gov/data/2023/geoinfo?get=NAME&for=county:*&in=metropolitan%20"
+                                    f"statistical%20area/micropolitan%20statistical%20area:{msa_geoid}%20"
+                                    f"state%20(or%20part):{state_geoid}&key={census_bureau_api_key}")
+
+            # query the API
+            geoinfo_counties_response = requests.get(geoinfo_counties_url)
+            geoinfo_counties_response.raise_for_status()
+            geoinfo_counties_data = geoinfo_counties_response.json()
+
+            # go through each county returned (the first is always just the format so can skip)
+            for county in geoinfo_counties_data[1:]:
+                # just in case test to same county[0] not "NAME"
+                if county[0] != "NAME":
+                    county_name = county[0].split(";")[0]
+                    counties_in_msa.add(f"{county_name}, {state_name}")
+
+        return counties_in_msa
+
+    # now main part of code
+    if geographic_scope == "msa":
+        this_lat_lon = get_lat_lon(place_name=place_name)
+        this_msa = get_msa_from_lat_lon(this_lat_lon)
+        these_county_names = get_counties_from_msa([this_msa]) # remember, am passing a list of msas
+
+    elif geographic_scope == "csa":
+        this_lat_lon = get_lat_lon(place_name=place_name)
+        this_csa = get_csa_from_lat_lon(this_lat_lon)
+        these_msas = get_msas_from_csa(this_csa)
+        these_county_names = get_counties_from_msa(these_msas)
+
+    else:
+        raise Exception("Geographic scope must be either 'city', 'msa', or 'csa'")
+
+    # list to return
+    county_reference_places = [ReferencePlace(place_name=place_name)] # starting off with original place name RefPlace
+
+    # go through county names and make ReferencePlaces
+    for county_name in these_county_names:
+        county_reference_places.append(ReferencePlace(place_name=county_name))
+
+    # return list of ReferencePlaces (counties)
+    return county_reference_places
+
+# function to check that a point is a valid coordinate
+def check_if_valid_coordinate_point(point: tuple) -> None:
+    """
+    Used to check that a point is a valid coordinate (i.e. a tuple or list of two values that are
+    both floats and match lat and lon requirements)
+
+    :param point: tuple or list of two values (latitude, longitude)
+    :return: None
+    """
+
+    # in case a point is not a list or tuple
+    if not isinstance(point, tuple):
+        raise ValueError("each point must be a tuple (or list) of (latitude, longitude)")
+
+    # otherwise (point is either a list or tuple)
+    else:
+        # check whether the tuple or list has exactly two values
+        if len(point) != 2:
+            raise ValueError("each point must be a tuple (or list) of (latitude, longitude). You passed "
+                             "a tuple or list with fewer or more than two values")
+        # point has two values, so check that they are valid lat lon values
+        else:
+            # check that each coordinate is a float
+            for coordinate in point:
+                if not isinstance(coordinate, float):
+                    raise ValueError("points must contain two float values")
+
+                # check that lat and lon values are within valid ranges
+            if point[0] < -90 or point[0] > 90:
+                raise ValueError("first value for must be a valid latitude (between -90 and 90)")
+            if point[1] < -180 or point[1] > 180:
+                raise ValueError("second value for point must be a valid longitude (between -180 and 180)")
+
+# NEED TO FIX TO CHECK WHETHER ADDRESS WILL BE ACCEPTED
+def check_if_valid_address(address: str) -> None:
+    """
+    Used to check that an address is a valid address (i.e. a string that can be used to get a valid coordinate)
+    :param address: str | string to test whether it is a valid address
+    :return: None
+    """
+    pass
+
+##### NEED TO FIX USING NOMANITIM API OR US CENSUS API
+def get_coordinates_from_address(address: str):
+    """
+
+    """
+    pass
+
+def generate_random_base64_value(input_number) -> str:
+# generate random scenario id
+        random_float = random.random()
+        random_integer_value = str(int(input_number * random_float)) # using random number between 0 and 1 billion
+        random_base64_value = base64.b64encode(random_integer_value.encode()).decode()
+        random_base64_value.replace("/", "xx") # replacing dash just to be safe
+
+        return random_base64_value
+
+
+
 
 if __name__ == "__main__":
     san_francisco_ref_place = ReferencePlace(place_name="San Francisco, California, USA",
                                              bound_box=(-122.4194, 37.7749, -122.3731, 37.8091))
     print(san_francisco_ref_place.plus_codes_for_bbox_corners)
+
+
