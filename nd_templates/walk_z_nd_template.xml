@@ -64,7 +64,7 @@
                         </PropertySetProperty>
                         <PropertySetProperty xsi:type='typens:PropertySetProperty'>
                             <Key>TravelMode0</Key>
-                            <Value xsi:type='xs:string'>{&quot;name&quot;:&quot;Waling&quot;,&quot;type&quot;:&quot;WALK&quot;,&quot;description&quot;:&quot;Collection
+                            <Value xsi:type='xs:string'>{&quot;name&quot;:&quot;Walking&quot;,&quot;type&quot;:&quot;WALK&quot;,&quot;description&quot;:&quot;Collection
                                 of network dataset settings that define actions that are allowed on the network and how
                                 the actions can be performed.&quot;,&quot;impedanceAttributeName&quot;:&quot;Walk_Time&quot;,&quot;timeAttributeName&quot;:&quot;Walk_Time&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[],&quot;attributeParameterValues&quot;:[],&quot;useHierarchy&quot;:false,&quot;uturnAtJunctions&quot;:&quot;esriNFSBAllowBacktrack&quot;,&quot;simplificationTolerance&quot;:null,&quot;simplificationToleranceUnits&quot;:&quot;esriMeters&quot;}
                             </Value>

@@ -52,7 +52,32 @@
     <NetworkType>1</NetworkType>
     <Buildable>true</Buildable>
     <SupportsTurns>true</SupportsTurns>
-    <Properties xsi:nil='true'/>
+    <Properties xsi:type='typens:PropertySet'>
+        <PropertyArray xsi:type='typens:ArrayOfPropertySetProperty'>
+            <PropertySetProperty xsi:type='typens:PropertySetProperty'>
+                <Key>NetworkTravelModes</Key>
+                <Value xsi:type='typens:PropertySet'>
+                    <PropertyArray xsi:type='typens:ArrayOfPropertySetProperty'>
+                        <PropertySetProperty xsi:type='typens:PropertySetProperty'>
+                            <Key>TravelModeCount</Key>
+                            <Value xsi:type='xs:int'>1</Value>
+                        </PropertySetProperty>
+                        <PropertySetProperty xsi:type='typens:PropertySetProperty'>
+                            <Key>TravelMode0</Key>
+                            <Value xsi:type='xs:string'>{&quot;name&quot;:&quot;Walking&quot;,&quot;type&quot;:&quot;WALK&quot;,&quot;description&quot;:&quot;Collection
+                                of network dataset settings that define actions that are allowed on the network and how
+                                the actions can be performed.&quot;,&quot;impedanceAttributeName&quot;:&quot;Walk_Time&quot;,&quot;timeAttributeName&quot;:&quot;Walk_Time&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[],&quot;attributeParameterValues&quot;:[],&quot;useHierarchy&quot;:false,&quot;uturnAtJunctions&quot;:&quot;esriNFSBAllowBacktrack&quot;,&quot;simplificationTolerance&quot;:null,&quot;simplificationToleranceUnits&quot;:&quot;esriMeters&quot;}
+                            </Value>
+                        </PropertySetProperty>
+                        <PropertySetProperty xsi:type='typens:PropertySetProperty'>
+                            <Key>DefaultTravelModeName</Key>
+                            <Value xsi:type='xs:string'>Waling</Value>
+                        </PropertySetProperty>
+                    </PropertyArray>
+                </Value>
+            </PropertySetProperty>
+        </PropertyArray>
+    </Properties>
     <UserData xsi:nil='true'/>
     <EdgeFeatureSources xsi:type='typens:ArrayOfEdgeFeatureSource'>
         <EdgeFeatureSource xsi:type='typens:EdgeFeatureSource'>
