@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 from pathlib import Path
@@ -31,6 +32,7 @@ import isodate
 from datetime import datetime
 from zipfile import ZipFile
 import random
+from shapely.geometry import Point
 
 # local module(s)
 import transit_data_for_arcgis
@@ -601,6 +603,18 @@ class ElevationMapper:
         # update the elevation enabled flag
         self.street_network.elevation_enabled = True
 
+        # update the geometry of the nodes to include the elevation
+        self.street_network_nodes["geometry"] = [
+            Point(row.geometry.x, row.geometry.y, z if z is not None else 0)
+            for (idx, row), z in zip(self.street_network_nodes.iterrows(), z_values)
+        ]
+
+        # change original network nodes geometry to include elevation
+        self.street_network.network_nodes["geometry"] = [
+            Point(row.geometry.x, row.geometry.y, z if z is not None else 0)
+            for (idx, row), z in zip(self.street_network_nodes.iterrows(), z_values)
+        ]
+
         # print extra blank line after progress bar thingy
         print()
         logging.info(f"Got elevation data for {len(self.street_network_nodes)} nodes")
@@ -629,7 +643,7 @@ class ElevationMapper:
             end_elevation = self.street_network_graph.nodes[end_node].get("elevation")
             edge_length = data.get("length", 0)
 
-            # only caclulate grade if elevation for start and end node available
+            # only calculate grade if elevation for start and end node available
             if start_elevation is not None and end_elevation is not None and edge_length > 0:
                 elevation_change = end_elevation - start_elevation
                 grade = (elevation_change / edge_length) * 100  # doing grade as percentage (100% = 45 degree slope)
@@ -806,244 +820,138 @@ class StreetFeatureClasses:
         self.nodes = street_network.network_nodes
         self.edges = street_network.network_edges
 
+        # the cache folder
+        self.cache_folder = self.street_network.cache_folder
+
         # error handling for using elevation when creating feature classes for street network
         if "z" not in self.street_network.network_nodes and self.use_elevation:
             raise Exception("Cannot use elevation because input StreetNetwork object has no z values")
 
-    # method to set up empty feature classes for street network which data can be copied to
-    def create_empty_feature_classes(self):
-        logging.info("Creating empty feature classes for street network")
+    def calculate_walk_times(self) -> None:
+        """
+        Adds necessary walk time columns to geodataframes for edges. In case elevation not enabled on network
+        dataset, then will calculate walk time as (length in meters/ 85 meters per minute). In case elevation
+        enabled, then will calculate walk time using Tobler's hiking function and calculate against and along walk
+        times.
+         """
+        logging.info("Calculating walk times for edges")
 
-        # in case at least one of the two feature classes for street network (nodes or edges) does not exist or reset
-        if (not (arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path))) or self.reset:
-            # possible case here is that one exists but not the other so need to overwrite to be on
-            arcpy.env.overwriteOutput = True
+        def calculate_flat_ground_walk_time(edges_gdf) -> None:
+            logging.info("Not using elevation; will calculate walk time as (length in meters/ 85 meters per minute)")
+            # love pandas/geopandas because all I have to do to calculate a new field is this!
+            edges_gdf["walk_time"] = (edges_gdf["length"] / 85)
 
-            # if want to use elevation for network dataset (already checked to make sure data has necessary z values)
-            if self.use_elevation:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc", geometry_type="POINT",
-                                                    spatial_reference=arcpy.SpatialReference(4326),
-                                                    has_z="ENABLED")
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc", geometry_type="POLYLINE",
-                                                    spatial_reference=arcpy.SpatialReference(4326),
-                                                    )
+        def calculate_walk_time_with_elevation(edges_gdf) -> None:
+            logging.info("Using elevation; will use Tobler's to calculate walk time")
 
-            # not using elevation
+            # in case no grade then don't just fail in the background
+            if "grade" not in edges_gdf.columns:
+                logging.warning("Input gdf has no grade column, will calculate flat ground walk times")
+                calculate_flat_ground_walk_time(edges_gdf)
             else:
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "nodes_fc", geometry_type="POINT",
-                                                    spatial_reference=arcpy.SpatialReference(4326))
-                arcpy.management.CreateFeatureclass(self.feature_dataset.path, "edges_fc", geometry_type="POLYLINE",
-                                                    spatial_reference=arcpy.SpatialReference(4326))
-        # both street FCs exist and reset not desired, so do nothing :)
-        else:
-            logging.info("Existing street network feature classes found and will be used")
-            pass
+                # Tobler's hiking function first along and then against
+                edges_gdf["walk_time_graded_FT"] = (100 * math.exp(-3.5 * abs(edges_gdf["grade"] / 100 + 0.05)))
+                edges_gdf["walk_time_graded_TF"] = (100 * math.exp(-3.5 * abs((-(edges_gdf["grade"])) / 100 + 0.05)))
 
-        # method outputs
-        logging.info("Successfully created empty feature classes")
-        return self.nodes_fc_path, self.edges_fc_path
-
-    # method uses arcpy cursor to add OSM gdfs data to feature classes, need to fix (attr fields empty except geometry?)
-    def add_street_network_data_to_feature_classes(self):
-        """
-        Method takes street network geodata frames for nodes and edges and adds them to feature classes
-        :return: None
-        """
-        process_start_time = time.perf_counter()
-        logging.info("Mapping street network data to feature classes")
-
-        # first checking that empty feature classes exist
-        if not (arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path)):
-            raise Exception(f"Cannot add street network data because either nodes "
-                            f"{self.nodes_fc_path} or {self.edges_fc_path} doesn't exist (create empty first)")
-
-        # now mapping data to feature classes for network for non-geometry fields (have to handle geometry separately)
-        # this section just makes sure each field mapped to feature classes gets the write type
-        for col in self.nodes.columns:
-            # for nodes
-            if col != "geometry":
-                if col == "osmid":  # need to make osmid a str because for large networks, gets too big
-                    field_type = "TEXT"
-                    arcpy.management.AddField(self.nodes_fc_path, col, field_type, field_length=2048)
-                elif self.nodes[col].dtype in ["int64", "int32"]:
-                    field_type = "LONG"
-                    arcpy.management.AddField(self.nodes_fc_path, col, field_type)
-                elif self.nodes[col].dtype in ["float64", "float32"]:
-                    field_type = "DOUBLE"
-                    arcpy.management.AddField(self.nodes_fc_path, col, field_type)
-                else:
-                    field_type = "TEXT"
-                    arcpy.management.AddField(self.nodes_fc_path, col, field_type, field_length=255)
-
-        # now mapping non geometry fields for edges
-        for col in self.edges.columns:
-            if col != "geometry":
-                if col == "osmid":  # need to make osmid a str because for large networks, gets too big
-                    field_type = "TEXT"
-                    arcpy.management.AddField(self.edges_fc_path, col, field_type, field_length=1024)
-                    field_type = "TEXT"
-                elif self.edges[col].dtype in ["int64", "int32"]:
-                    field_type = "LONG"
-                    arcpy.management.AddField(self.edges_fc_path, col, field_type)
-                elif self.edges[col].dtype in ["float64", "float32"]:
-                    field_type = "DOUBLE"
-                    arcpy.management.AddField(self.edges_fc_path, col, field_type)
-                else:
-                    field_type = "TEXT"
-                    arcpy.management.AddField(self.edges_fc_path, col, field_type, field_length=255)
-
-        # if using elevation then need to make xyz points
+        # now can calculate walk times
         if self.use_elevation:
-            if "grade" not in self.edges.columns:
-                raise Exception("Cannot use elevation because edges do not have grades")
+            calculate_walk_time_with_elevation(self.edges)
+        else:
+            calculate_flat_ground_walk_time(self.edges)
 
-            # creating node attribute fields (
-            node_fields = ["SHAPE@XYZ"] + [col for col in self.nodes.columns if col not in ["geometry", "x", "y", "z"]]
-            with arcpy.da.InsertCursor(self.nodes_fc_path, node_fields) as cursor:
-                for idx, row in self.nodes.iterrows():
-                    geom = (row.geometry.x, row.geometry.y, row["z"] if "z" in row and row["z"] is not None else 0)
-                    values = [geom] + [row[col] for col in self.nodes.columns if col not in ["geometry", "x", "y", "z"]]
-                    cursor.insertRow(values)
+    # now going to convert gdfs to geojson (faster than creating feature class using insert cursor)
+    def convert_geodataframes_to_geojson(self) -> tuple[str, str]:
+        logging.info("Converting geodataframes to GeoJSONs")
+        process_start_time = time.perf_counter()
 
-            # creating edges feature classes
-            edge_fields = ["SHAPE@"] + [col for col in self.edges.columns if col != "geometry"]
-            with arcpy.da.InsertCursor(self.edges_fc_path, edge_fields) as cursor:
-                for idx, row in self.edges.iterrows():
-                    coords = list(row.geometry.coords)
-                    array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
-                    polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
-                    values = [polyline] + [
-                        ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
-                        for col in self.edges.columns if col != "geometry"
-                    ]
-                    cursor.insertRow(values)
+        # create paths for the shapefiles
+        nodes_geojson_path = os.path.join(self.cache_folder.path, "nodes_fc.geojson")
+        edges_geojson_path = os.path.join(self.cache_folder.path, "edges_fc.geojson")
 
-            # adding fields for network dataset creations
-            logging.info("Adding necessary fields for edges")
+        # make sure that the required directories exist
+        os.makedirs(os.path.dirname(nodes_geojson_path), exist_ok=True)
+        os.makedirs(os.path.dirname(edges_geojson_path), exist_ok=True)
 
-            # check if grade data exists, if so calculate graded walk time for against and along directions
-            if "grade" in self.edges.columns:
+        # write the gdfs to shapefiles
+        self.nodes.to_file(nodes_geojson_path, driver="GeoJSON")
+        self.edges.to_file(edges_geojson_path, driver="GeoJSON")
 
-                # walk time from to (along) field
-                arcpy.management.AddField(self.edges_fc_path, "walk_time_graded_FT", "DOUBLE")
-                arcpy.management.CalculateField(
-                    self.edges_fc_path,
-                    "walk_time_graded_FT",
-                    # tobbler's hiking function for walking speed as function of grade
-                    "!Shape.length@meters! / (100 * math.exp(-3.5 * abs(!grade! / 100 + 0.05)))",
-                    "PYTHON3")
+        # housekeeping
+        process_run_time = time.perf_counter() - process_start_time
+        logging.info(f"Finished converting geodataframes to GeoJSONs in {process_run_time} seconds")
 
-                # walk time to-from (against) field
-                arcpy.management.AddField(self.edges_fc_path, "walk_time_graded_TF", "DOUBLE")
-                arcpy.management.CalculateField(
-                    self.edges_fc_path,
-                    "walk_time_graded_TF",
-                    "!Shape.length@meters! / (100 * math.exp(-3.5 * abs((-!grade!) / 100 + 0.05)))",
-                    "PYTHON3")
+        return nodes_geojson_path, edges_geojson_path
 
-            # if no grade data, calculate walk time without grade (same as if on flat ground/not using grade
-            else:
-                arcpy.management.AddField(self.edges_fc_path, "walk_time_graded_FT", "DOUBLE")
-                arcpy.management.CalculateField(
-                    self.edges_fc_path,
-                    "walk_time_graded_FT",
-                    # tobbler's hiking function for walking speed as function of grade
-                    "!Shape.length@meters! / 85",
-                    "PYTHON3"
-                )
-
-                # walk time to-from (against)
-                arcpy.management.AddField(self.edges_fc_path, "walk_time_graded_TF", "DOUBLE")
-                arcpy.management.CalculateField(
-                    self.edges_fc_path,
-                    "walk_time_graded_TF",
-                    "!Shape.length@meters! / 85",
-                    "PYTHON3")
-
-            # making sure no multipart edges (had to change to updateCursor because was shadowing insert cursor before)
-            with arcpy.da.UpdateCursor(self.edges_fc_path, ["SHAPE@"]) as update_cursor:
-                broken_rows = []
-                for row_idx, row in enumerate(update_cursor):
-                    if row[0] is not None and row[0].isMultipart:
-                        logging.warning("Multipart geometry detected!")
-                        print(f"row_idx: {row_idx}, row:{row}, row[0]:{row[0]}")
-                        break
-
-                    # is true iff the row is empty!
-                    if row[0] is None:
-                        # delete empty row so doesn't cause problems with integrate function
-                        print(f"row_idx: {row_idx}, row:{row}")
-                        broken_rows.append(row)
-                        update_cursor.deleteRow()
-                        print(row in update_cursor)
-
-            # integrate to snap nearby vertices
-            arcpy.management.Integrate(self.edges_fc_path, "0.1 Meters")
-            process_runtime = time.perf_counter() - process_start_time
-            logging.info(f"Created Feature Classes from osmnx nodes and edges in {process_runtime} seconds")
-            return self.nodes_fc_path, self.edges_fc_path
-
-        else:  # in case where elevation not enabled
-            # attribute table fields for nodes
-            node_fields = ["SHAPE@XY"] + [col for col in self.nodes.columns if col not in ["geometry", "x", "y"]]
-            with arcpy.da.InsertCursor(self.nodes_fc_path, node_fields) as cursor:
-                for idx, row in self.nodes.iterrows():
-                    geom = (row.geometry.x, row.geometry.y)
-                    values = [geom] + [row[col] for col in self.nodes.columns if col not in ["geometry", "x", "y"]]
-                    cursor.insertRow(values)
-
-            # attribute table fields for edges                                                                           # left here because once grade added will need to change fields
-            edge_fields = ["SHAPE@"] + [col for col in self.edges.columns if col != "geometry"]
-            with arcpy.da.InsertCursor(self.edges_fc_path, edge_fields) as cursor:
-                for idx, row in self.edges.iterrows():
-                    coords = list(row.geometry.coords)
-                    array = arcpy.Array([arcpy.Point(x, y) for x, y in coords])
-                    polyline = arcpy.Polyline(array, arcpy.SpatialReference(4326))
-                    values = [polyline] + [
-                        ', '.join(map(str, row[col])) if isinstance(row[col], list) else row[col]
-                        for col in self.edges.columns if col != "geometry"
-                    ]
-                    cursor.insertRow(values)
-
-            # adding fields for network dataset creations
-            logging.info("Adding necessary fields for edges")
-            arcpy.management.AddField(self.edges_fc_path, "walk_time", "DOUBLE")
-            arcpy.management.CalculateField(self.edges_fc_path, "walk_time",
-                                            "!Shape.length@meters! / 85",
-                                            "PYTHON3")
-
-            # walk time with grade fields
-
-            # making sure no multipart edges
-            with arcpy.da.SearchCursor(self.edges_fc_path, ["SHAPE@"]) as cursor:
-                for row in cursor:
-                    if row[0] is not None and row[0].isMultipart:
-                        logging.warning("Multipart geometry detected!")
-                        break
-
-            # integrate to snap nearby vertices
-            arcpy.management.Integrate(self.edges_fc_path, "0.1 Meters")
-            process_runtime = time.perf_counter() - process_start_time
-            logging.info(f"Created Feature Classes from osmnx nodes and edges in {process_runtime} seconds")
-            return self.nodes_fc_path, self.edges_fc_path
-
-    def save_street_feature_classes_to_shapefile(self):
+    # now can convert the geojsons for nodes and edges into feature classes
+    def convert_geojsons_to_feature_class(self, outputted_geojsons: tuple[str, str]):
         """
-        Saves the street feature classes created as is (whether fields created or not) to shapefile in cache folder for
-        street network.
-        Returns:
-             (path of nodes shapefile, path of edges shapefile).
+        Takes the street network geojson created by convert_geodataframes_to_geojson and turns them
+        into geodatabase feature classes
         """
-        # make sure not trying to erroneously save non-existent feature classes
-        assert arcpy.Exists(self.nodes_fc_path) and arcpy.Exists(self.edges_fc_path), \
-            "The street feature classes cannot be saved because they have not yet been created"
+        logging.info("Converting GeoJSONs to GeoDatabase feature classes")
+        process_start_time = time.perf_counter()
 
-        arcpy.env.overwriteOutput = True
-        arcpy.conversion.FeatureClassToShapefile("nodes_fc", self.street_network.cache_folder.path)
-        arcpy.conversion.FeatureClassToShapefile("edges_fc", self.street_network.cache_folder.path)
-        logging.info(f"Nodes and edges feature classes succesfully saved as shapefiles in cache folder "
-                     f"{self.street_network.cache_folder}")
-        arcpy.env.overwriteOutput = False  # setting overwrite output back to false so no accidental overwriting
+        # get the paths to the geojson out from the provided tuple
+        nodes_geojson_path = outputted_geojsons[0]
+        edges_geojson_path = outputted_geojsons[1]
+
+        # just a reminder that the object has the desired fc paths as attributes
+        # (self.nodes_fc_path and self.edges_fc_path)
+
+        # convert nodes from geojson to feature class using arcpy
+        logging.info("Converting nodes GeoJSON to feature class")
+        arcpy.conversion.JSONToFeatures(in_json_file=nodes_geojson_path, out_features=self.nodes_fc_path,
+                                        geometry_type="POINT")
+        # do the same for edges
+        logging.info("Converting edges GeoJSON to feature class")
+        arcpy.conversion.JSONToFeatures(in_json_file=edges_geojson_path, out_features=self.edges_fc_path,
+                                        geometry_type="POLYLINE")
+
+        # housekeeping
+        process_run_time = time.perf_counter() - process_start_time
+        logging.info(f"Finished converting GeoJSONs to geodatabase feature classes in {process_run_time} seconds")
+
+        ### MIGHT WANT TO ADD BIT HERE TO DELETE THE geojsons? ###
+
+    def map_street_network_to_feature_classes(self):
+        """
+        The only method needed to call for this feature class, maps the street network edges and
+        nodes to feature classes.
+        """
+        # first check if cached GeoJSONs
+
+        nodes_geojson_path = os.path.join(self.cache_folder.path, "nodes_fc.geojson")
+        edges_geojson_path = os.path.join(self.cache_folder.path, "edges_fc.geojson")
+
+        # in case where cached data exists
+        if os.path.exists(nodes_geojson_path) and os.path.exists(edges_geojson_path):
+
+            logging.info("Cached GeoJSONs found, converting to feature classes")
+            process_start_time = time.perf_counter()
+
+            # just need to convert the geojsons to feature classes
+            input_geojsons = (nodes_geojson_path, edges_geojson_path)
+            self.convert_geojsons_to_feature_class(input_geojsons)
+
+            # housekeeping
+            process_run_time = time.perf_counter() - process_start_time
+            logging.info(f"Mapped the street network to feature classes in {process_run_time} seconds")
+
+        else:
+            logging.info("Cached data not available, mapping street network to feature classes")
+            logging.info("")
+            process_start_time = time.perf_counter()
+            # first, calculate walk times while still a dataframe
+            self.calculate_walk_times()
+
+            # next, convert gdfs to geojsons and then geojsons to feature classes
+            outputted_geojsons = self.convert_geodataframes_to_geojson()
+            self.convert_geojsons_to_feature_class(outputted_geojsons)
+
+            # housekeeping
+            process_run_time = time.perf_counter() - process_start_time
+            logging.info(f"Mapped the street network to feature classes in {process_run_time} seconds")
+
 
 class TransitNetwork:
     def __init__(self, geographic_scope, feature_dataset: FeatureDataset, reference_place_list: list[ReferencePlace],

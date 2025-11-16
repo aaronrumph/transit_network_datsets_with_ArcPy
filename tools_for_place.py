@@ -172,10 +172,8 @@ class Place:
                                                                     use_elevation=True,
                                                                     reset=full_reset)
 
-        # setting up empty street feature classes (edges_fc and nodes_fc), then populating them, then caching them
-        street_feature_classes_for_place.create_empty_feature_classes()
-        street_feature_classes_for_place.add_street_network_data_to_feature_classes()
-        street_feature_classes_for_place.save_street_feature_classes_to_shapefile()
+        # testing switch over to gdf -> shp -> fc method
+        street_feature_classes_for_place.map_street_network_to_feature_classes()
 
         # if using transit then need to create a Transit Network and get it setup
         if "transit" == network_type[:7]:
@@ -227,10 +225,10 @@ class Place:
         return self.agencies_that_serve_place
 
     def generate_isochrone(self, isochrone_name:str=None, addresses:list[str] | str=None,
-                           points:list[tuple[float]] | tuple[float]=None, network_type:str="transit",
+                           points:list[tuple[float, float]] | tuple[float, float]=None, network_type:str="transit",
                            use_elevation:bool=False, cutoffs_minutes:list[float]=None,
                            travel_direction:str="TO_FACILITIES",
-                           day_of_week:str="Today", date:str=None, time:str="9:00 AM", open_on_complete=True):
+                           day_of_week:str="Today", date:str=None, analysis_time:str="9:00 AM", open_on_complete=True):
         """
         This method creates an isochrone for a given set of addresses or points using the specified network type and
         cutoffs. This will mostly just be used to demonstrate the functionality of the network dataset. Can pass either
@@ -246,11 +244,12 @@ class Place:
         :param network_type: the network type to be built or used for the analysis
         :param use_elevation: whether the network should use elevation or not
         :param cutoffs_minutes: the isochrone cutoffs to be used (in minutes)
-        :param travel_direction: whether to do time to or from facilities {"FROM_FACILITIES", "TO_FACILITIES"}
+        :param travel_direction: whether to do analysis_time to or from facilities {"FROM_FACILITIES", "TO_FACILITIES"}
         :param day_of_week: the day of the week to use for the analysis {"Today", "Monday", "Tuesday", "Wednesday",
                                                                         "Thursday", "Friday", "Saturday", "Sunday"}
         :param date: date to use for the analysis (e.g. "11/15/2025")
-        :param time: time to use for the analysis (e.g. "9:00 AM")
+        :param analysis_time: time to use for the analysis (e.g. "9:00 AM")
+        :param open_on_complete: whether to open the project automatically after the analysis is complete
 
         :return:
         """
@@ -259,6 +258,10 @@ class Place:
         # if no name for service area layer provided, generate random base64 value
         if isochrone_name is None:
             isochrone_name = generate_random_base64_value(1000000000)
+
+        # check that travel_direction is valid
+        if travel_direction not in ["FROM_FACILITIES", "TO_FACILITIES"]:
+            raise ValueError("travel_direction must be one of the following: FROM_FACILITIES, TO_FACILITIES")
 
         # set default cutoffs to use for service area analysis
         if cutoffs_minutes is None:
@@ -325,8 +328,27 @@ class Place:
         network_dataset_path = os.path.join(self.gdb_path, feature_dataset_would_be_named,
                                             f"{network_type}_{using_elevation_tag}_nd")
 
+        points_to_add = []
 
-        # turn address into points ##### NEED TO FIX
+        # add points to list of points to add to the input fc
+        if points is not None:
+            if isinstance(points, list):
+                for point in points:
+                    points_to_add.append(point)
+            elif isinstance(points, tuple):
+                points_to_add.append(points)
+            else:
+                raise ValueError("points must be a list of tuples or a single tuple of (latitude, longitude)")
+
+        # turn address into points (can pass either list of addresses or single address so no need to check type)
+        if isinstance(addresses, list):
+            address_coordinates = get_coordinates_from_address(addresses)
+            for address_coordinate in address_coordinates:
+                points_to_add.append(address_coordinate)
+        elif isinstance(addresses, str):
+            address_coordinates = get_coordinates_from_address(addresses)
+            points_to_add.append(address_coordinates)
+
 
 
         logging.info("Checking whether or not a network dataset required for the analysis already exists")
@@ -343,13 +365,13 @@ class Place:
         # create points feature classes
         input_fc_path = add_points_arcgis(feature_dataset_path=
                                           os.path.join(self.gdb_path, feature_dataset_would_be_named),
-                                          fc_name=f"{self.snake_name}_test_points", point_coordinates=points)
+                                          fc_name=f"{self.snake_name}_test_points", point_coordinates=points_to_add)
 
         # set travel mode
         travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
                                                                                                 "isochrone_travel_mode"]
 
-        # set time to analyze
+        # set analysis_time to analyze
         if date is None:
             # use ArcGIS magic dates for day of week
             day_map = {
@@ -362,9 +384,9 @@ class Place:
                 "Friday": "1/5/1900",
                 "Saturday": "1/6/1900"
             }
-            time_to_analyze = f"{day_map[day_of_week]} {time}"
+            time_to_analyze = f"{day_map[day_of_week]} {analysis_time}"
         else:
-            time_to_analyze = f"{date} {time}"
+            time_to_analyze = f"{date} {analysis_time}"
 
         # the path where the isochrone layer will go
         isochrone_path = os.path.join(self.gdb_path, isochrone_name)
@@ -372,8 +394,8 @@ class Place:
         check_out_network_analyst_extension()
         logging.info("Creating service area analysis layer")
         result_object = arcpy.na.MakeServiceAreaAnalysisLayer(network_data_source=network_dataset_path,
-                                                              layer_name=isochrone_path, travel_mode=travel_mode,
-                                                              travel_direction=travel_direction,
+                                                              layer_name=isochrone_name, travel_mode=travel_mode,
+                                                              travel_direction=travel_direction, # gives warning because expects literal but fine
                                                               time_of_day=time_to_analyze, cutoffs=cutoffs_minutes,
                                                               geometry_at_overlaps="DISSOLVE")
         # get layer object out
@@ -392,12 +414,12 @@ class Place:
         logging.info("Solving service area analysis layer")
         arcpy.na.Solve(layer_object)
 
-        # save the service area as layer file
+        # save the service area as layer file ### NEED TO FIX LAYER NAME BECAUSE RIGHT NOW IT IS FULL PATH??
         layers_dir = os.path.join(self.arcgis_project.project_dir_path, "layers")
         if not os.path.exists(layers_dir):
             os.makedirs(layers_dir, exist_ok=True)
         output_layer_file = os.path.join(layers_dir, f"{isochrone_name}.lyrx")
-        arcpy.SaveToLayerFile_management(layer_object, output_layer_file)
+        arcpy.SaveToLayerFile_management(in_layer=layer_object, out_layer=output_layer_file, is_relative_path="ABSOLUTE")
 
         # setting up the maps for the project
         maps = self.arcgis_project.arcObject.listMaps("Map")
@@ -409,8 +431,8 @@ class Place:
         # add the layer to the map
         aprxMap = maps[0]
         # now make LayerFile Object and add to map
-        layer_file = arcpy.mp.LayerFile(output_layer_file)
-        aprxMap.addDataFromPath(layer_file)
+        isochrone_layer_file = arcpy.mp.LayerFile(output_layer_file)
+        aprxMap.addDataFromPath(isochrone_layer_file)
 
         # color to make all pretty like
         sa_polygons = aprxMap.listLayers(polygons_layer_name)[0]
@@ -427,6 +449,7 @@ class Place:
         for i, brk in enumerate(breaks):
             brk.symbol.color = colors[i]
 
+        # now can actually set the polygon's symbology
         sa_polygons.symbology = polygon_symbology
 
         # saving hopefully makes changes persist
@@ -434,8 +457,9 @@ class Place:
 
         # housekeeping
         logging.info("Isochrones generated successfully")
-        if open_on_complete:
 
+        if open_on_complete:
+            logging.info("Now opening ArcGIS Pro")
             # need to clear the arcObject to ensure it's not locked so can open automatically because lazy
             del self.arcgis_project.arcObject
             # sleepytime! (I'm so incredibly sick of debugging this and am getting a bit loopy)
@@ -444,17 +468,27 @@ class Place:
             # now can open project automatically?
             os.startfile(self.arcgis_project.path)
 
+    # will add support for route as well
+    def generate_route(self, route_name:str=None, addresses:list[str] | str=None,
+                           points:list[tuple[float]] | tuple[float]=None, network_type:str="transit",
+                           use_elevation:bool=False, day_of_week:str="Today", date:str=None, analysis_time:str="9:00 AM", 
+                       open_on_complete=True):
+        pass
+
+    # important!! method that generates origin-destination cost matrix
+    def generate_od_cost_matrix(self):
+        pass
+
+
 
 # # # # # # # # # # # # # # # # # # Testing Area :::: DO NOT REMOVE "if __name__ ..." # # # # # # # # # # # # # # # # #
 
 if __name__ == "__main__":
-    arc_package_project = ArcProject("i_wanna_die_debugging")
+    arc_package_project = ArcProject("upp_461_final_actual")
     arc_package_project.set_up_project()
-    test_place = Place(arc_package_project, place_name="Chicago, Illinois, USA", geographic_scope="city",
-                       scenario_id="iso_test")
-    test_points = [(41.90410981160005,-87.67746626340725), (41.78955232059429,-87.59392298141859)]
-    test_place.generate_isochrone(isochrone_name="my_apt_and_uchicago", points=test_points, network_type="transit",
-                                  use_elevation=False)
+    Chicago = Place(arc_package_project, place_name="Oakland, California, USA", geographic_scope="city",
+                       scenario_id="Current")
+    Chicago.create_network_dataset_from_place(network_type="walk", use_elevation=False, full_reset=True)
 
 
 

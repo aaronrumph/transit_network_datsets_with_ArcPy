@@ -14,6 +14,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv("api_keys.env")
 census_bureau_api_key = os.getenv("CENSUS_BUREAU_API_KEY")
+from geopy.geocoders import Nominatim
+
 
 
 # regex matching patterns for use in checking other stuff
@@ -401,12 +403,90 @@ def check_if_valid_address(address: str) -> None:
     """
     pass
 
-##### NEED TO FIX USING NOMANITIM API OR US CENSUS API
-def get_coordinates_from_address(address: str):
-    """
+def get_coordinates_from_address(address: list[str] | str):
+    """ Takes a single address as input and then turns it into a tuple of (latitude, longitude) using nominatim API """
+    logging.info(f"Geocoding input address {address}")
+    # first, extra checking to make sure address is valid input
+    check_if_valid_address(address)
 
-    """
-    pass
+    # set up for query
+    nominatim_url = "https://nominatim.openstreetmap.org/search"
+
+    # first in case where only one address provided
+    if isinstance(address, str):
+        # again using q for open ended search which will return a bunch of characteristics of the address
+        nominatim_params = {
+            "q": address,
+            "limit": "1",
+            "format": "json"}
+
+        # again, need to use user agent for nominatim API (but can be an string value????)
+        nominatim_headers = {"User-Agent": "Network_Datasets"}
+
+        # now can actually query the API
+        nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
+        nominatim_response.raise_for_status()
+        nominatim_data = nominatim_response.json()
+
+        # if nominatim couldn't find anywhere, then address was improperly formed
+        if len(nominatim_data) == 0:
+            raise ValueError(f"Address {address} could not be geocoded, "
+                             f"please double check that the address is correct")
+
+        # get lat and lon out of response
+        nominatim_content = nominatim_data[0]
+        address_lat = float(nominatim_content["lat"])
+        address_lon = float(nominatim_content["lon"])
+
+        # now define address coordinate tuple to return
+        address_coordinates = (address_lat, address_lon)
+        logging.info(f"Successfully geocoded address: {address}, lat, lon = {address_coordinates}")
+        return address_coordinates
+
+    # in case where multiple addresses provided
+    elif isinstance(address, list):
+        # list of coordinate tuples to return
+        all_address_coordinates = []
+        # again using q for open ended search which will return a bunch of characteristics of the address
+        for individual_address in address:
+            # again using q for open ended search which will return a bunch of characteristics of the address
+            nominatim_params = {
+                "q": individual_address,
+                "limit": "1",
+                "format": "json"}
+
+            # again, need to use user agent for nominatim API (but can be an string value????)
+            nominatim_headers = {"User-Agent": "Network_Datasets"}
+
+            # now can actually query the API
+            nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
+            nominatim_response.raise_for_status()
+            nominatim_data = nominatim_response.json()
+
+            # if nominatim couldn't find anywhere, then address was improperly formed
+            if len(nominatim_data) == 0:
+                raise ValueError(
+                    f"Address {address} could not be geocoded, please double check that the address is correct")
+
+            # get lat and lon out of response
+            nominatim_content = nominatim_data[0]
+            ind_address_lat = float(nominatim_content["lat"])
+            ind_address_lon = float(nominatim_content["lon"])
+
+            individual_address_coordinates:tuple = (ind_address_lat, ind_address_lon)
+
+            # now define address coordinate tuple to return
+            all_address_coordinates.append(individual_address_coordinates)
+
+            # need to sleep because rate limits of nominatim API
+            from time import sleep as sleepytime
+            sleepytime(1.1)
+        logging.info(f"Successfully geocoded {len(address)} addresses")
+        return all_address_coordinates
+
+    # in weird third case
+    else:
+        raise ValueError("Must provide either a string or a list of strings")
 
 def generate_random_base64_value(input_number) -> str:
 # generate random scenario id
