@@ -1,23 +1,19 @@
 """
-This module exists to take all the various tools already created in the create network_dataset_oop.py file and
+This module exists to take all the various tools already created in the create_network_dataset_oop.py file and
 organize them into a class that can be used to create network datasets from OSM street network data. Also used
 to get transit data for a place and use that to create a transit network dataset.
 """
-import time
 
-import network_types
 # yes I know it's bad practice to use import * but in this case, I've made sure that it won't cause any problems
 # (can safely map namespace of create_network_dataset_oop to this module because were developed in tandem)
 from create_network_dataset_oop import *
 from gtfs_tools import *
 from general_tools import *
-import transit_data_for_arcgis
+
 
 # standard library modules
 import logging
 import os
-import random
-import base64
 
 
 
@@ -27,19 +23,48 @@ logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 logging.getLogger("requests").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
 
-arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
-arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
-os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
-# if you want to add modules, MUST (!!!!!!!) come after this block (ensures extensions work in cloned environment)
+# set up arcpy environment
+arcpy_config.set_up_arcpy_env()
+
+# if you want to add modules (non std lib), MUST (!!!!!!!) come after this block
+# (ensures extensions work in cloned environment)
 import arcpy
 import arcpy_init
 #
 
 
 class Place:
-    """ Class that represents a place and contains methods to create network datasets for it"""
-    def __init__(self, arcgis_project:ArcProject, place_name=None, bound_box=None, geographic_scope:str="city",
-                 scenario_id:str=None):
+    """
+    Class that represents a place and contains methods to create network datasets for it
+
+    Parameters:
+        arcgis_project (ArcProject): ArcGIS project object
+        place_name (str): Name of place
+        bound_box (tuple): Bounding box of place | (longitude_min, latitude_min, longitude_max, latitude_max)
+        geographic_scope (str): Geographic scope of place | {"place_only"", "county", "msa", "csa", "specified"}
+            specified means a list of places to include in the network dataset (must be well-formed place names that
+            OSM will recognize).
+        scenario_id (str): Scenario ID | if you would like to keep track of the same GeoDatabase/Network Dataset
+            across multiple runs, then you should use the same scenario_id for each run! By default, will be
+            a random (partially modified) base64 value.
+        specified_places_to_include (list[str]): List of places to include in the network dataset if using
+            "specified" geographic scope
+
+    Methods:
+        use_scope_for_place(geographic_scope="place_only") -> None: Sets the geographic scope for the place
+        create_network_dataset_from_place(network_type="walk", use_elevation=False, full_reset=False,
+                                          elevation_reset=False) -> None: Creates network dataset for place of specified
+                                          type
+        get_agencies_for_place() -> None: Gets agencies that serve the place (for transit network datasets)
+        generate_isochrones_for_place() -> None: Generates isochrones for the place
+
+    """
+    def __init__(self, arcgis_project:ArcProject, place_name:str | None=None,
+                 bound_box:tuple[str | float, str | float, str | float, str | float] | None=None,
+                 geographic_scope:str="place_only",
+                 scenario_id:str=None, specified_places_to_include:list[str]=None):
+
+
         if place_name is None and bound_box is None:
             raise ValueError("Must provide either a place or bounding box")
         # parameters
@@ -48,6 +73,7 @@ class Place:
         self.bound_box = bound_box
         self.geographic_scope = geographic_scope
         self.scenario_id = scenario_id
+        self.specified_places_to_include = specified_places_to_include
 
         if self.scenario_id is None:
             self.scenario_id = generate_random_base64_value(1000000000)
@@ -66,7 +92,8 @@ class Place:
         self.reference_place_list = []
 
         # the corresponding gdb path:
-        self.gdb_path = os.path.join(self.arcgis_project.project_dir_path, f"{self.snake_name_with_scope}.gdb",)
+        self.gdb_path = os.path.join(self.arcgis_project.project_dir_path, f"{self.snake_name_with_scope}.gdb")
+        self.network_dataset_for_place = None
 
         # attributes to check whether certain things exist
         self.street_network_data_exists = False
@@ -86,49 +113,65 @@ class Place:
         # always use scope for place
         self.use_scope_for_place(geographic_scope=geographic_scope)
 
-    def use_scope_for_place(self, geographic_scope="city"):
+    def use_scope_for_place(self, geographic_scope="place_only"):
 
         # can set the geographic scope to something new
         self.geographic_scope = geographic_scope
 
-        # the list of ReferencePlaces to use in creating the network
-        reference_place_list = []
-
         # if using bounding box
         if self.bound_box:
+            # the list of ReferencePlaces to use in creating the network (just the bounding box)
             reference_place_list = [self.main_reference_place]
 
         # if using city limits and reference place
-        elif self.place_name and self.geographic_scope == "city":
+        elif self.place_name and self.geographic_scope == "place_only":
+            # the list of ReferencePlaces to use in creating the network
             reference_place_list = [self.main_reference_place]
 
-        # in case where using msa
-        elif self.place_name and self.geographic_scope == "msa":
-            reference_place_list = get_reference_places_for_scope(self.place_name, self.geographic_scope)
+        # if using specified places
+        elif self.place_name and self.geographic_scope == "specified":
+            logging.info(f"Using the provided list of other places to include {self.specified_places_to_include}")
+            # check that if specified is selected that specified_places_to_include is not None
+            if self.specified_places_to_include is None:
+                raise ValueError("Geographic scope is 'specified', but no specified places to include were provided")
+            # for each place name in specified_places_to_include, create a ReferencePlace object and add it to the list
+            reference_place_list = [ReferencePlace(place_name=place_name) for
+                                    place_name in self.specified_places_to_include]
+            # also need to add the original place to the list (in first position so that the network is seen as being
+            # 'centered' on the main place)
+            reference_place_list.insert(0, self.main_reference_place)
 
-        # in case where using csa
-        elif self.place_name and self.geographic_scope == "csa":
+        # if using county, msa, or csa
+        elif (self.place_name and
+              (self.geographic_scope == "county" or self.geographic_scope == "msa" or self.geographic_scope == "csa")):
             reference_place_list = get_reference_places_for_scope(self.place_name, self.geographic_scope)
 
         else:
-            raise Exception("Geographic scope not recognized, please use 'city', 'msa', or 'csa'")
+            raise ValueError("Geographic scope not recognized, please use "
+                            "'city', 'county', 'msa', 'csa', or 'specified'")
 
         # now set the list
         self.reference_place_list = reference_place_list
         return reference_place_list
 
     def create_network_dataset_from_place(self, network_type="walk", use_elevation=False, full_reset=False,
-                                          elevation_reset=False):                                # still need to figure out what to do with bounding box rather than place
+                                          elevation_reset=False) -> None:                                # still need to figure out what to do with bounding box rather than place
         """
         Creates network dataset from for specified place using OSM street network data.
         :param network_type: str | {"walk", "drive", "bike", "transit"}
         :param use_elevation: bool | whether to use elevation data for the streets in the network (in order to calculate
             grade adjusted walk-times/bike-times
-        :param network_type: str |
-        :param use_elevation: bool |
-        :param full_reset: bool |
-        :param elevation_reset:
-        :return:
+        :param use_elevation: bool | Whether to use elevation when creating the network dataset. If True, will query
+            USGS EPQS API to get elevations, but be warned this can be very slow (even though I made it as fast as I
+            could with asyncio)
+        :param full_reset: bool | WARNING!!: If True, will nuke the entire geodatabase (if it exists) for the place.
+            Use with caution!
+        :param elevation_reset: bool | If True, will reset the elevation data for the network dataset (if it exists).
+            To be avoided because requires querying the EPQS API again, which can be very slow. However, if you are
+            seeing that many edges in the network dataset have no elevation data (will see a logging message in the
+            console), you may want to try this.
+        :return: None | You will have to manually open ArcGIS Pro, and open the catalog to add your network dataset to
+            your map
         """
         logging.info(f"Creating network dataset for {self.main_reference_place.pretty_name}")
 
@@ -162,7 +205,7 @@ class Place:
             # using elevation
             street_network_for_place.get_street_network_from_osm()
 
-            # create new elevationmapper object for this street network and then getting elevations and nodes
+            # create new ElevationMapper object for this street network and then getting elevations and nodes
             elevation_mapper_for_place = ElevationMapper(street_network=street_network_for_place,reset=elevation_reset)
             elevation_mapper_for_place.add_elevation_data_to_nodes()
             elevation_mapper_for_place.add_grades_to_edges()
@@ -225,14 +268,14 @@ class Place:
         return self.agencies_that_serve_place
 
     def generate_isochrone(self, isochrone_name:str=None, addresses:list[str] | str=None,
-                           points:list[tuple[float, float]] | tuple[float, float]=None, network_type:str="transit",
+                           points:list[tuple[float, float]] | tuple[float, float]=None, network_type:str="walk",
                            use_elevation:bool=False, cutoffs_minutes:list[float]=None,
-                           travel_direction:str="TO_FACILITIES",
-                           day_of_week:str="Today", date:str=None, analysis_time:str="9:00 AM", open_on_complete=True):
+                           travel_direction:str="TO_FACILITIES", day_of_week:str="Today", date:str=None,
+                           analysis_time:str="9:00 AM", open_on_complete=True, reset_network_dataset:bool=False):
         """
         This method creates an isochrone for a given set of addresses or points using the specified network type and
         cutoffs. This will mostly just be used to demonstrate the functionality of the network dataset. Can pass either
-        well formed address(es) (see address parameter) or tuple(s) of (latitude, longitude) (see points parameter). Can
+        well-formed address(es) (see address parameter) or tuple(s) of (latitude, longitude) (see points parameter). Can
         specify what kind of network to use; by default, will use non-elevation enabled transit network dataset.
         If one already exists for the place, it will be used. If not, a new one matching the desired analysis
         will be generated. Can choose to specify cutoffs in minutes (see cutoffs_minutes parameter) or
@@ -250,6 +293,8 @@ class Place:
         :param date: date to use for the analysis (e.g. "11/15/2025")
         :param analysis_time: time to use for the analysis (e.g. "9:00 AM")
         :param open_on_complete: whether to open the project automatically after the analysis is complete
+        :param reset_network_dataset: WARNING! whether to reset the network dataset before running the analysis
+            (doing this will wreck any other isochrones that used the old, conflicting network dataset if there was one
 
         :return:
         """
@@ -280,16 +325,9 @@ class Place:
         if addresses is None and points is None:
             raise ValueError("must provide either address(es) or point(s)")
 
-        # checking that correct type(s) for addresses using check_if_valid_address function from general_tools.py
+        # checking that correct type(s) for addresses (valid address checking handled by get_coordinates_from_address)
         if not isinstance(addresses, list) and not isinstance(addresses, str) and addresses is not None:
             raise ValueError("addresses must be a list of strings or a single address string")
-        # in case list of addresses provided
-        elif isinstance(addresses, list):
-            for address in addresses:
-                check_if_valid_address(address)
-        # in case one address provided
-        elif isinstance(addresses, str):
-            check_if_valid_address(addresses)
 
         # checking that points are valid
         if not isinstance(points, list) and not isinstance(points, tuple) and points is not None:
@@ -328,15 +366,20 @@ class Place:
         network_dataset_path = os.path.join(self.gdb_path, feature_dataset_would_be_named,
                                             f"{network_type}_{using_elevation_tag}_nd")
 
-        points_to_add = []
+        # the next part involves preparing the input points and addresses for the 'facilities' sublayer for the analysis
+        # points and addresses (which have been geocoded to points) will go into the input feature class, which will
+        # then be used as the input for the facilities sublayer for the analysis
+        logging.info(f"Processing inputted points/addresses: {points} {addresses}")
+        # the list of input points that will go into the input feature class (includes points AND addresses as points)
+        input_point_coordinates = []
 
-        # add points to list of points to add to the input fc
+        # add points to list of point coordinates
         if points is not None:
             if isinstance(points, list):
                 for point in points:
-                    points_to_add.append(point)
+                    input_point_coordinates.append(point)
             elif isinstance(points, tuple):
-                points_to_add.append(points)
+                input_point_coordinates.append(points)
             else:
                 raise ValueError("points must be a list of tuples or a single tuple of (latitude, longitude)")
 
@@ -344,28 +387,31 @@ class Place:
         if isinstance(addresses, list):
             address_coordinates = get_coordinates_from_address(addresses)
             for address_coordinate in address_coordinates:
-                points_to_add.append(address_coordinate)
+                # add to the list of input
+                input_point_coordinates.append(address_coordinate)
         elif isinstance(addresses, str):
             address_coordinates = get_coordinates_from_address(addresses)
-            points_to_add.append(address_coordinates)
+            input_point_coordinates.append(address_coordinates)
 
-
-
+        # now actually dealing with network dataset for the analysis
         logging.info("Checking whether or not a network dataset required for the analysis already exists")
-        # check if exists and mark
-        if arcpy.Exists(network_dataset_path):
+
+        # check that 1) network dataset exists and 2) reset_network_dataset is False (no ND reset desired)
+        if arcpy.Exists(network_dataset_path) and not reset_network_dataset:
             logging.info(f"Using existing network dataset {network_type}_{using_elevation_tag}")
             pass
-        # in case no matching network dataset could be found
+        # in case no matching network dataset could be found or reset desired
         else:
             logging.info(f"No network dataset found. Creating {network_type}_{using_elevation_tag}")
+            # passing the reset_network_dataset parameter to the create_network_dataset_from_place method just in case
             self.create_network_dataset_from_place(network_type=network_type, use_elevation=use_elevation,
-                                                   full_reset=False)
+                                                   full_reset=reset_network_dataset,
+                                                   elevation_reset=reset_network_dataset)
 
         # create points feature classes
         input_fc_path = add_points_arcgis(feature_dataset_path=
                                           os.path.join(self.gdb_path, feature_dataset_would_be_named),
-                                          fc_name=f"{self.snake_name}_test_points", point_coordinates=points_to_add)
+                                          fc_name=f"{self.snake_name}_test_points", point_coordinates=input_point_coordinates)
 
         # set travel mode
         travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
@@ -406,7 +452,7 @@ class Place:
         facilities_layer_name = sublayer_names["Facilities"]
         polygons_layer_name = sublayer_names["SAPolygons"]
 
-        # add facilites to layer
+        # add facilities to layer
         logging.info("Adding inputted points/addresses to service area analysis layer")
         arcpy.na.AddLocations(layer_object, facilities_layer_name, in_table=input_fc_path)
 
@@ -462,7 +508,7 @@ class Place:
             logging.info("Now opening ArcGIS Pro")
             # need to clear the arcObject to ensure it's not locked so can open automatically because lazy
             del self.arcgis_project.arcObject
-            # sleepytime! (I'm so incredibly sick of debugging this and am getting a bit loopy)
+            # sleepytime! (I'm so incredibly sick of debugging this, and I'm getting a bit loopy)
             from time import sleep as sleepytime
             sleepytime(1)
             # now can open project automatically?
@@ -484,11 +530,31 @@ class Place:
 # # # # # # # # # # # # # # # # # # Testing Area :::: DO NOT REMOVE "if __name__ ..." # # # # # # # # # # # # # # # # #
 
 if __name__ == "__main__":
-    arc_package_project = ArcProject("upp_461_final_actual")
-    arc_package_project.set_up_project()
-    Chicago = Place(arc_package_project, place_name="Oakland, California, USA", geographic_scope="city",
-                       scenario_id="Current")
-    Chicago.create_network_dataset_from_place(network_type="walk", use_elevation=False, full_reset=True)
+    arc_package_project = ArcProject("code_demonstration")
+    Berkeley = Place(arc_package_project, place_name="Chicago, Illinois, USA", geographic_scope="place_only",
+                       scenario_id="chicago_timing")
+    Berkeley.create_network_dataset_from_place(network_type="walk", use_elevation=False)
+
+    ### NOTE FOR DEBUGGING/FIXING CODE::::
+    """
+    create_network_dataset_from_place() fails if 
+        1. The Place object (or an equivalent one with the same attributes) has already had a network dataset created
+        and 
+        2. The network dataset created prior's use_elevation attribute does not match the use_elevation attribute of the 
+            current call. 
+            
+    This is because switched from caching the edges gdf to using geojson as cache and now precalculating walk times (as 
+    opposed to calculating field IN Arc before). Easy solution is to calculate both "flat_walk_time" and graded walk times.
+    Need to edit template xml tho
+    
+    also: at the moment, when using specified, MSA, or CSA as geographic scope, the graphs that osmnx returns only 
+    include edges that are fully inside a given place. Thus, because in my workflow I am getting the graphs for each
+    place in the list (whether that be each county for CSAs/MSAs or each specified place for specified), and then 
+    composing them, at the moment the resulting network dataset has gaps at the borders of the places (in parentheses 
+    above). I'm planning on fixing this by getting the polygon for each place from osmnx using the geocode_to_gdf 
+    function and then combining the polygons using shapely, and then using graph_from_polygon instead of ...from_place,
+    but that will be next. 
+"""
 
 
 

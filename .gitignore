@@ -1,6 +1,10 @@
-config.py
+
 cache/
 berkeley_california_usa_cache/
 troubleshooting.py
 run_in_arcgispro.py
 api_keys.env
+/testing_isochrones/
+/cache/
+/i_wanna_die_debugging/
+/code_demonstration/

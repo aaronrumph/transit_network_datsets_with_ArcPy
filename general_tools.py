@@ -16,6 +16,9 @@ load_dotenv("api_keys.env")
 census_bureau_api_key = os.getenv("CENSUS_BUREAU_API_KEY")
 from geopy.geocoders import Nominatim
 
+# nominatim user agent
+nominatim_user_agent = os.getenv("NOMINATIM_USER_AGENT")
+
 
 
 # regex matching patterns for use in checking other stuff
@@ -169,14 +172,75 @@ def create_snake_name(name:str | ReferencePlace):
     else:
         raise ValueError("Name must be either a string or a ReferencePlace instance")
 
+# dictionary for converting state abbreviation to fips and name
+state_fips_and_abbreviations = {
+    "AL": {"fips": "01", "name": "Alabama"},
+    "AK": {"fips": "02", "name": "Alaska"},
+    "AZ": {"fips": "04", "name": "Arizona"},
+    "AR": {"fips": "05", "name": "Arkansas"},
+    "CA": {"fips": "06", "name": "California"},
+    "CO": {"fips": "08", "name": "Colorado"},
+    "CT": {"fips": "09", "name": "Connecticut"},
+    "DE": {"fips": "10", "name": "Delaware"},
+    "DC": {"fips": "11", "name": "District of Columbia"},
+    "FL": {"fips": "12", "name": "Florida"},
+    "GA": {"fips": "13", "name": "Georgia"},
+    "HI": {"fips": "15", "name": "Hawaii"},
+    "ID": {"fips": "16", "name": "Idaho"},
+    "IL": {"fips": "17", "name": "Illinois"},
+    "IN": {"fips": "18", "name": "Indiana"},
+    "IA": {"fips": "19", "name": "Iowa"},
+    "KS": {"fips": "20", "name": "Kansas"},
+    "KY": {"fips": "21", "name": "Kentucky"},
+    "LA": {"fips": "22", "name": "Louisiana"},
+    "ME": {"fips": "23", "name": "Maine"},
+    "MD": {"fips": "24", "name": "Maryland"},
+    "MA": {"fips": "25", "name": "Massachusetts"},
+    "MI": {"fips": "26", "name": "Michigan"},
+    "MN": {"fips": "27", "name": "Minnesota"},
+    "MS": {"fips": "28", "name": "Mississippi"},
+    "MO": {"fips": "29", "name": "Missouri"},
+    "MT": {"fips": "30", "name": "Montana"},
+    "NE": {"fips": "31", "name": "Nebraska"},
+    "NV": {"fips": "32", "name": "Nevada"},
+    "NH": {"fips": "33", "name": "New Hampshire"},
+    "NJ": {"fips": "34", "name": "New Jersey"},
+    "NM": {"fips": "35", "name": "New Mexico"},
+    "NY": {"fips": "36", "name": "New York"},
+    "NC": {"fips": "37", "name": "North Carolina"},
+    "ND": {"fips": "38", "name": "North Dakota"},
+    "OH": {"fips": "39", "name": "Ohio"},
+    "OK": {"fips": "40", "name": "Oklahoma"},
+    "OR": {"fips": "41", "name": "Oregon"},
+    "PA": {"fips": "42", "name": "Pennsylvania"},
+    "RI": {"fips": "44", "name": "Rhode Island"},
+    "SC": {"fips": "45", "name": "South Carolina"},
+    "SD": {"fips": "46", "name": "South Dakota"},
+    "TN": {"fips": "47", "name": "Tennessee"},
+    "TX": {"fips": "48", "name": "Texas"},
+    "UT": {"fips": "49", "name": "Utah"},
+    "VT": {"fips": "50", "name": "Vermont"},
+    "VA": {"fips": "51", "name": "Virginia"},
+    "WA": {"fips": "53", "name": "Washington"},
+    "WV": {"fips": "54", "name": "West Virginia"},
+    "WI": {"fips": "55", "name": "Wisconsin"},
+    "WY": {"fips": "56", "name": "Wyoming"},
+    "AS": {"fips": "60", "name": "American Samoa"},
+    "GU": {"fips": "66", "name": "Guam"},
+    "MP": {"fips": "69", "name": "Northern Mariana Islands"},
+    "PR": {"fips": "72", "name": "Puerto Rico"},
+    "UM": {"fips": "74", "name": "U.S. Minor Outlying Islands"},
+    "VI": {"fips": "78", "name": "U.S. Virgin Islands"}
+}
+
 def get_reference_places_for_scope(place_name:str, geographic_scope:str):
     """
     using nested functions because I am tired and want to
     """
 
     logging.info(f"Getting reference places for {place_name} {geographic_scope}")
-    # first can just return city proper if try passing "city" as scope
-    if geographic_scope == "city":
+    # first can just return city proper if try passing "place_only" as scope
+    if geographic_scope == "place_only":
         return [ReferencePlace(place_name)]
 
     def get_lat_lon(place_name: str):
@@ -195,7 +259,7 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
             "limit": "10",
             "format": "json"}
         # need to give valid User-Agent header
-        nominatim_headers = {"User-Agent": "Network_Datasets"}
+        nominatim_headers = {"User-Agent": nominatim_user_agent}
 
         # now get response from API
         nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
@@ -211,6 +275,30 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
 
     # the url for the geocoding API
     census_bureau_geocoding_url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+
+    # adding in support for just the county level for a given place
+    def get_county_from_lat_lon(place_lat_lon:dict):
+
+        census_bureau_geocoding_params = {
+            "x": place_lat_lon["lon"],
+            "y": place_lat_lon["lat"],
+            "format": "json",
+            "benchmark": "Public_AR_Current",   # just the weird current version shorthand
+            "vintage": "4",                     # same as above
+            "layers": "82"}  # 80 is the layer code for county
+
+        census_bureau_response = requests.get(census_bureau_geocoding_url, params=census_bureau_geocoding_params)
+        census_bureau_response.raise_for_status()
+
+        # turn into JSON
+        census_bureau_data = census_bureau_response.json()
+        returned_geographies = census_bureau_data["result"]["geographies"]
+        name_for_county = returned_geographies["Counties"][0]["NAME"]
+
+        # going to return a set of counties for consistency with msa and csa
+        set_of_counties = {name_for_county}
+
+        return set_of_counties
 
     # now that have lat and lon in place, can get MSA (and state) geoids using Census geocoder
     def get_msa_from_lat_lon(place_lat_lon:dict):
@@ -262,28 +350,51 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
         # take response json data and use to po
         census_bureau_data = census_bureau_response.json()
         returned_geographies = census_bureau_data["result"]["geographies"]
-
-        # get state geoid out of returned geographies
-        state_geoid = returned_geographies["States"][0]["GEOID"]
-        # same thing here, can safely use first result because csas are mutually exclusive
-        csa_geoid = returned_geographies["Combined Statistical Areas"][0]["GEOID"]
-        # get state name out of returned geographies
-        state_name = returned_geographies["States"][0]["BASENAME"]
+        csa_data = returned_geographies["Combined Statistical Areas"][0]
 
 
-        # returning a dict: {"msa_geoid": [msa_geoid_0...], "state_geoid": [state_geoid]}
-        geoids = {"csa_geoid": csa_geoid, "state_geoid": state_geoid, "state_name": state_name}
-        return geoids
+        # can safely use first result for csa
+        csa_geoid = csa_data["GEOID"]
+        # get name of csa (for finding states)
+        csa_name = csa_data["NAME"]
 
-    def get_msas_from_csa(geoids:dict):
+        # now the hard part, turning the name into a list of states in the csa. e.g., Chicago-Naperville, IL-IN-WI CSA
+        csa_comma_separated_name = csa_name.split(", ") # note the space, so first char of last item is letter not space
 
+        # since every csa is named "..., STATE ABBREVIATION(s) CSA", can just take last element of comma separated
+        csa_states_with_csa = csa_comma_separated_name[-1]
+        # now slice string so that we have just the state abbreviation(s) (i.e., take all but last four characters)
+        concatenated_state_abbreviations = csa_states_with_csa[:-4]
+        # the list of state names to return
+        state_abbreviations = []
+        # now check if multiple states in csa
+        if "-" in concatenated_state_abbreviations:
+            for state_abbreviation in concatenated_state_abbreviations.split("-"):
+                state_abbreviations.append(state_abbreviation)
+        else:
+            state_abbreviations.append(concatenated_state_abbreviations)
+
+        # using the state_fips_and_abbreviations dict, can now get state geoids and names
+        state_geoids = []
+        state_names = []
+        for state_abbreviation in state_abbreviations:
+            state_geoid = state_fips_and_abbreviations[state_abbreviation]["fips"]
+            state_geoids.append(state_geoid)
+            state_name = state_fips_and_abbreviations[state_abbreviation]["name"]
+            state_names.append(state_name)
+
+
+        # retunr dictionary with info on the csa (geoid, the states in the csa's names and geoids)
+        csa_info = {"csa_geoid": csa_geoid, "state_geoids": state_geoids, "state_names": state_names}
+        return csa_info
+
+    def get_msas_from_csa(csa_info):
+        # get csd info out of provided dict
+        csa_geoid = csa_info["csa_geoid"]
+        state_geoids = csa_info["state_geoids"]
+        state_names = csa_info["state_names"]
         # the list of msa_geoid_dict dicts to return
         msa_geoid_list = []
-
-        # get csa_geoid out of input
-        csa_geoid = geoids["csa_geoid"]
-        state_geoid = geoids["state_geoid"]
-        state_name = geoids["state_name"]
 
         # the geoinfo census bureau api url needed for query
         geoinfo_url = (f"https://api.census.gov/data/2023/geoinfo?get=NAME&for=metropolitan%20statistical%20area/"
@@ -299,10 +410,12 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
         for msa in geoinfo_data[1:]:
             # just in case test to same msa[0] not "NAME"
             if msa[0] != "NAME":
+                # geoid is 3rd element of list returned by api
                 msa_geoid = msa[2]
-                msa_geoid_dict = {"msa_geoid": msa_geoid, "state_geoid": state_geoid, "state_name": state_name}
+                # need to create a dictionary for each msa with state name and geoid
+                msa_geoid_dict = {"msa_geoid": msa_geoid, "state_geoids": state_geoids, "state_names": state_names}
+                # now add to list
                 msa_geoid_list.append(msa_geoid_dict)
-
         return msa_geoid_list
 
     def get_counties_from_msa(msa_geoids:list[dict]):
@@ -310,29 +423,36 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
 
         # the set of counties to return
         counties_in_msa = set()
+
         # iterating through msas provided
         for msa in msa_geoids:
             # get data out of the msa dict
             msa_geoid = msa["msa_geoid"]
-            state_geoid = msa["state_geoid"]
-            state_name = msa["state_name"]
+            state_geoids = msa["state_geoids"]
+            state_names = msa["state_names"]
 
-            # easier to just define new url for each msa rather than try to set parameters with base url
-            geoinfo_counties_url = (f"https://api.census.gov/data/2023/geoinfo?get=NAME&for=county:*&in=metropolitan%20"
-                                    f"statistical%20area/micropolitan%20statistical%20area:{msa_geoid}%20"
-                                    f"state%20(or%20part):{state_geoid}&key={census_bureau_api_key}")
+            # because we do not know which state the msa is in so need to try each state with each msa
+            for state_geoid, state_name in zip(state_geoids, state_names):
+                logging.debug(f"Trying state geoid {state_geoid} for state {state_name} for MSA {msa_geoid}")
+                # easier to just define new url for each msa rather than try to set parameters with base url
+                geoinfo_counties_url = (f"https://api.census.gov/data/2023/geoinfo?get=NAME&for=county:*&in=metropolitan%20"
+                                        f"statistical%20area/micropolitan%20statistical%20area:{msa_geoid}%20"
+                                        f"state%20(or%20part):{state_geoid}&key={census_bureau_api_key}")
 
-            # query the API
-            geoinfo_counties_response = requests.get(geoinfo_counties_url)
-            geoinfo_counties_response.raise_for_status()
-            geoinfo_counties_data = geoinfo_counties_response.json()
+                # query the API
+                geoinfo_counties_response = requests.get(geoinfo_counties_url)
 
-            # go through each county returned (the first is always just the format so can skip)
-            for county in geoinfo_counties_data[1:]:
-                # just in case test to same county[0] not "NAME"
-                if county[0] != "NAME":
-                    county_name = county[0].split(";")[0]
-                    counties_in_msa.add(f"{county_name}, {state_name}")
+                # check if the response code is 200, meaning actually has data (otherwise no data and will fail)
+                if geoinfo_counties_response.status_code == 200:
+                    logging.debug(f"State geoid {state_geoid} for state {state_name} for MSA {msa_geoid} was successful")
+                    # since actually has data, can turn response in json
+                    geoinfo_counties_data = geoinfo_counties_response.json()
+                    # go through each county returned (the first is always just the format so can skip)
+                    for county in geoinfo_counties_data[1:]:
+                        # just in case test to same county[0] not "NAME"
+                        if county[0] != "NAME":
+                            county_no_state_name = county[0].split(";")[0]
+                            counties_in_msa.add(f"{county_no_state_name}, {state_name}")
 
         return counties_in_msa
 
@@ -348,8 +468,12 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
         these_msas = get_msas_from_csa(this_csa)
         these_county_names = get_counties_from_msa(these_msas)
 
+    elif geographic_scope == "county":
+        this_lat_lon = get_lat_lon(place_name=place_name)
+        these_county_names = get_county_from_lat_lon(this_lat_lon)
+
     else:
-        raise Exception("Geographic scope must be either 'city', 'msa', or 'csa'")
+        raise Exception("Geographic scope must be either 'city', 'county', 'msa', or 'csa'")
 
     # list to return
     county_reference_places = [ReferencePlace(place_name=place_name)] # starting off with original place name RefPlace
@@ -357,6 +481,8 @@ def get_reference_places_for_scope(place_name:str, geographic_scope:str):
     # go through county names and make ReferencePlaces
     for county_name in these_county_names:
         county_reference_places.append(ReferencePlace(place_name=county_name))
+
+    logging.info(f"Found {len(county_reference_places) - 1} counties for {place_name} in {geographic_scope}")
 
     # return list of ReferencePlaces (counties)
     return county_reference_places
@@ -394,26 +520,18 @@ def check_if_valid_coordinate_point(point: tuple) -> None:
             if point[1] < -180 or point[1] > 180:
                 raise ValueError("second value for point must be a valid longitude (between -180 and 180)")
 
-# NEED TO FIX TO CHECK WHETHER ADDRESS WILL BE ACCEPTED
-def check_if_valid_address(address: str) -> None:
-    """
-    Used to check that an address is a valid address (i.e. a string that can be used to get a valid coordinate)
-    :param address: str | string to test whether it is a valid address
-    :return: None
-    """
-    pass
-
 def get_coordinates_from_address(address: list[str] | str):
-    """ Takes a single address as input and then turns it into a tuple of (latitude, longitude) using nominatim API """
-    logging.info(f"Geocoding input address {address}")
-    # first, extra checking to make sure address is valid input
-    check_if_valid_address(address)
+    """
+    Takes a single address or list of addresses as input and then turns it into a tuple of (latitude, longitude)
+    using nominatim API
+    """
 
     # set up for query
     nominatim_url = "https://nominatim.openstreetmap.org/search"
 
     # first in case where only one address provided
     if isinstance(address, str):
+        logging.info(f"Geocoding input address {address}")
         # again using q for open ended search which will return a bunch of characteristics of the address
         nominatim_params = {
             "q": address,
@@ -421,7 +539,7 @@ def get_coordinates_from_address(address: list[str] | str):
             "format": "json"}
 
         # again, need to use user agent for nominatim API (but can be an string value????)
-        nominatim_headers = {"User-Agent": "Network_Datasets"}
+        nominatim_headers = {"User-Agent": nominatim_user_agent}
 
         # now can actually query the API
         nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
@@ -449,14 +567,15 @@ def get_coordinates_from_address(address: list[str] | str):
         all_address_coordinates = []
         # again using q for open ended search which will return a bunch of characteristics of the address
         for individual_address in address:
+            logging.info(f"Geocoding input addresses {individual_address}")
             # again using q for open ended search which will return a bunch of characteristics of the address
             nominatim_params = {
                 "q": individual_address,
                 "limit": "1",
                 "format": "json"}
 
-            # again, need to use user agent for nominatim API (but can be an string value????)
-            nominatim_headers = {"User-Agent": "Network_Datasets"}
+            # again, need to use user agent for nominatim API (but can be any string value????)
+            nominatim_headers = {"User-Agent": nominatim_user_agent}
 
             # now can actually query the API
             nominatim_response = requests.get(nominatim_url, params=nominatim_params, headers=nominatim_headers)
@@ -497,6 +616,13 @@ def generate_random_base64_value(input_number) -> str:
 
         return random_base64_value
 
+def turn_seconds_into_minutes(seconds: float) -> str:
+    minutes = int(seconds / 60)
+    remaining_seconds = seconds % 60
+    if minutes == 0:
+        return f"{remaining_seconds:.2f} seconds"
+    else:
+        return f"{minutes} minutes, {remaining_seconds:.2f} seconds"
 
 
 
