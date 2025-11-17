@@ -189,3 +189,47 @@ Nothing to see here yet, sorry!
   from TransitLand's API, it will crash and burn when it doesn't find any.
 - At the moment, only looks for transit agencies that serve the main place given, not all in the CSA, MSA, or county
 - Color ramp for isochrones is opposite of what I would like (darker means less time rather than lighter means less time)
+
+## Eventual Goals
+Somethings I would like to add/change about this code:
+
+### Open Source!
+At the moment, my code uses ArcPy, which is great in that it's easy and Esri gives you a lot of very powerful tools 
+fresh out of the box. That said, there are two problems: first, you have to have an ArcGIS Pro license 
+(expensive) as well as access to the Network Analyst extension; second, while it is nice not having
+to write all the code for creating a network dataset (which is just a fancy graph) myself, Esri's code is
+not exactly the fastest or best at times.
+
+As such, I hope to eventually do all of that stuff myself. Fortunately, there are many, many other people
+who are committed to/working on open source transportation network stuff, and I hope to expand on their work!
+Some of this stuff already exists and it's just a matter of adapting it for this use case (e.g., there 
+are a million implementations of Dijkstra's to use for shortest path), whereas some of it will require lots
+of work to create a solution from scratch (e.g., I have not come across any open source algorithms
+that can create graphs that represent a transit network based on GTFS data). 
+
+### Other Network Analysis Tools
+For now, the only two features I have are creating network datasets and generating isochrones,
+and while these are all well and good, I would like to (and indeed, need to, for a project I'm working
+on for class) add support for Origin-Destination Cost Matrices, Shortest Path Routing, and more.
+
+### Other Network Types
+Unfortunately, my code in its current form only allows for the creation/use of transit and walking
+network datasets. When I have some more time, I would love to add support for driving and biking 
+(and biking + transit).
+
+### Bring Your Own GTFS Data/Improved Transit Networks
+As mentioned previously, when building a transit network dataset at the moment,
+you can only use the automatically retreived GTFS data for the specified place.
+I would like to, and should soon, add the ability to _'bring your own'_ GTFS data
+to use in building the transit network dataset. My goal is to make the user
+interface for this as friendly as possible, so that it is usable by other people.
+
+Additionally, I would like to fix the current behavior where it only gets the transit
+agencies that serve the 'core' place rather than the entire selected geographic scope.
+
+### A CLI/GUI
+Long term, I would like to create a GUI or CLI that I can distribute to people so that 
+they can use this code *without* having to install an IDE, or clone their
+arcgispro-py3 env themself. This may be dependent on the Open Source goal,
+as otherwise it'd be a mess of permissions (especially with ArcGIS/Esri), 
+but I believe it's the ultimate long term goal. 
