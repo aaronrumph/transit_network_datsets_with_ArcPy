@@ -23,7 +23,11 @@ Also, fair warning, while I have tried to optimize my code as much as possible, 
 There's only so much I can do. Though I'd like to think I'm not horrible at programming, I'm sure I've done some stupid
 things. ArcPy tends to be pretty slow (so whenever possible, I've tried to avoid using it). Also, the sheer amount of 
 data used in creating a network dataset (particularly if you're using elevation data or if you're doing CSAs or MSAs)
-means its just going to take a while no matter what. 
+means it's just going to take a while no matter what. 
+
+The goal of this readme is to make my code accessible to others, primarily planning students/planners. As such, not much
+technical knowledge (at least when it comes to Python, ArcGIS on the other hand...) is presumed. If you have lots of 
+experience working with Python (or any other programming language), you may want to skip the _IDE Set Up_ section. 
 
 #### To give a sense here are some (pretty accurate) estimated runtimes for various scenarios based on my own experiments:
 
@@ -71,12 +75,17 @@ clone it there, or you can use the Python Command Prompt that comes with ArcGIS 
         
         conda activate arcgispro-py3-nd-clone
 Also, you will need to install the required packages for this project that don't come already installed in the clone
-(see _Requirements.txt_).
+(see _Requirements.txt_). Make a note of the path to your environment as you'll need it to set up the interpreter in 
+the IDE.
 
-##### If you are using an IDE to run the code
+##### If you are using an IDE to run the code:
 You will need to set up the environment in the IDE to use the cloned environment. 
-This will vary depending on the IDE you are using, but pretty straightforward in most cases (if not, use Google/Bing/Your IDE's Documentation/AskJeeves).
-#### Now, you should be set up to use ArcPY!
+This will vary depending on the IDE you are using, but pretty straightforward in most cases 
+(if not, use Google/Bing/Your IDE's Documentation/AskJeeves), or see below.
+
+**If you do not know how to do this, and are using an IDE for the first time, see _IDE Set Up_ section below**
+
+Now, you should be set up to use ArcPY!
     
 
 ### 3) **API Keys**
@@ -110,17 +119,32 @@ Also note that if you use spaces, you should use quotes around your user agent. 
 
 
 
+### IDE Set Up and Downloading Code (skip if familiar)
+The easiest way to play around with my code is just to clone it from this GitHub repository and then import it into your
+IDE. If you already have an IDE, I'm going to assume you know how to do this. If not, I would recommend PyCharm as your 
+IDE because it's free and is just what I use (you can download it [here](https://www.jetbrains.com/pycharm/download/?section=windows)).
 
-## Features
+**Once you've downloaded and installed PyCharm, you should see a screen that looks like this:**
 
-#### 1) Create Network Datasets using free, open data!
- - Create walking or transit network datasets for various geographies
- - Create network datasets for a bounding box
- - Create network datasets that take elevation into account
+![image](markdown_images/pycharm_welcome_page.png)
 
-#### 2) Generate Isochrones using the Network Datasets
-- Generate isochrones from addresses 
-- Generate isochrones from points
+Now, you can just hit the _Clone Repository_ button in the top right, and enter the following URL:
+        
+    https://github.com/aaronrumph/transit_network_datsets_with_ArcPy
+
+Then, you can just hit the _Clone_ button, and you will now have a copy of the files necessary to play around with my 
+code! Now, you need to configure the project to use the right interpreter. If you have not already done the steps 
+explained in item 2) in the _Set Up_ section, you will need to do that now. Now, hit ctrl+alt+s to open the settings, 
+and then navigate to _Python_ and then under that, _Interpreter_. Now, you should see a window that looks like 
+![this](markdown_images/pycharm_interpreter_settings.png)
+
+Click _Add Interpreter_, and then _Local Interpreter_. Then, click _Select existing_, and 
+navigate to the path to your cloned argispro-py3 environment that you created in item 2) of the _Set Up_ section
+(arcgispro-py3-nd-clone). By default, your path should be something like:
+
+    ...Users\<your_name>\AppData\Local\ESRI\conda\envs\arcgispro-py3-nd-clone\python.exe"
+
+You can then set that as your interpreter and after it loads, you should be good to go!
 
 ## How to Use
 Honestly, the best thing to see how it works (as frustrating as it sounds), is just to play around with it, and read the
@@ -135,14 +159,25 @@ and a Place object:
     
     your_place = Place(arcgis_project=your_arcgis_project, place_name="San Francisco", geographic_scope="place_only")
 
-and then run the create_network_dataset_from_place method:
+and then call the create_network_dataset_from_place method:
     
     your_place.create_network_dataset_from_place(network_type="walk", use_elevation=False)
 
-or run the generate_isochrone method:
+or the generate_isochrone method:
     
     your_place.generate_isochrones_from_place(isochrone_name="demonstration_isochrone, addresses=[your_addr_1, your_addr_2], points=[your_point_1, your_point_2], 
                                               network_type="walk", use_elevation=False)
+
+## Features
+
+#### 1) Create Network Datasets using free, open data!
+ - Create walking or transit network datasets for various geographies
+ - Create network datasets for a bounding box
+ - Create network datasets that take elevation into account
+
+#### 2) Generate Isochrones using the Network Datasets
+- Generate isochrones from addresses 
+- Generate isochrones from points
 
 
 ## Development Process
