@@ -1,14 +1,16 @@
 import math
 import os
+import shutil
 import sys
 from pathlib import Path
 
 from arcgis import features
 
+
+
 # Setting up python environment/making sure env points to extensions correctly
-arcgis_bin = r"C:\Program Files\ArcGIS\Pro\bin"
-arcgis_extensions = r"C:\Program Files\ArcGIS\Pro\bin\Extensions"
-os.environ["PATH"] = arcgis_bin + os.pathsep + arcgis_extensions + os.pathsep + os.environ.get("PATH", "")
+import arcpy_config
+arcpy_config.set_up_arcpy_env()
 
 # if you want to add modules, MUST (!!!!!!!) come after this block (ensures extensions work in cloned environment)
 import arcpy
@@ -33,6 +35,7 @@ from datetime import datetime
 from zipfile import ZipFile
 import random
 from shapely.geometry import Point
+import numpy as np
 
 # local module(s)
 import transit_data_for_arcgis
@@ -67,10 +70,12 @@ network_analyst_extension_checked_out = False
 # ArcGIS project setup
 class ArcProject:
     """ Class for ArcGIS Projects.
-        Attributes:
-            name: str, project_location: str
-            (path to directory where project should exist), and reset: bool (clears project if true).
-            By default, the project will be within the same directory as this module.
+        Parameters:
+            name: str,
+            project_location: str | path to directory where project should exist, by default,
+                the project will be within the same directory as this module.
+            reset: bool (clears project if true).
+
         Methods:
             set_up_project(self) (see documentation below)
     """
@@ -85,6 +90,9 @@ class ArcProject:
         self.layouts = []
         self.project_file = self.path
         self.arcObject = None
+
+        # set up on initialization
+        self.set_up_project()
 
     # method to create project if doesn't already exist, and to activate project
     def set_up_project(self):
@@ -303,7 +311,7 @@ class StreetNetwork:
     Class representing street network for a location
 
     Attributes:
-        geographic_scope (str): Geographic scope of the street network {"city", "msa", "csa"}
+        geographic_scope (str): Geographic scope of the street network {"place_only", "msa", "csa"}
         reference_place_list: list of reference places to get network for (len will be one if using city limits, other-
         wise, will contain all the places in the MSA if MSA desired and in CSA if CSA desired)
         network_type (str): type of network being created {"walk_no_z", "walk_z", "bike_no_z", "bike_z",
@@ -391,9 +399,13 @@ class StreetNetwork:
                     for reference_place in self.reference_place_list:
                         logging.info(f"Getting street network for {reference_place.pretty_name}")
 
-                        # getting each indiviudal graph one at a time first
+                        # getting each individual graph one at a time first
                         single_network_graph = ox.graph_from_place(reference_place.place_name,
-                                                            network_type=self.osmnx_type, retain_all=True)
+                                                                   network_type=self.osmnx_type, retain_all=True,
+                                                                   truncate_by_edge=True)
+                                                                   # need to use truncate_by_edge when using
+                                                                   # multiple reference places to avoid gaps at borders
+
                         # add each individual graph to the list so can combine
                         network_graphs.append(single_network_graph)
 
@@ -470,7 +482,7 @@ class ElevationMapper:
                 add_elevation_data_to_nodes)
     """
 
-    def __init__(self, street_network: StreetNetwork, concurrent_requests_desired:int=300, reset=False):
+    def __init__(self, street_network: StreetNetwork, concurrent_requests_desired:int=100, reset=False):
         self.street_network = street_network
         self.concurrent_requests_desired = concurrent_requests_desired
         self.reset = reset
@@ -493,8 +505,8 @@ class ElevationMapper:
             # using try in case of exception in getting elevation for node
             try:
                 # essentially same as requests.get but for async function. Timeout set as 30s should be high enough but
-                # 45 or 60s might be better
-                async with async_session.get(usgs_url, params=params, timeout=60) as response:
+                # 45 or 60s might be better (using 100 because not happy with me)
+                async with async_session.get(usgs_url, params=params, timeout=100) as response:
 
                     if response.status != 200:
                         raise Exception(f"HTTP {response.status}: {await response.text()}")
@@ -551,7 +563,7 @@ class ElevationMapper:
         semaphore = asyncio.Semaphore(self.concurrent_requests_desired)
 
         # have to manually define TCP connector to force close otherwise leave zombie connections
-        connector = aiohttp.TCPConnector(limit=300, limit_per_host=300, ttl_dns_cache=300, enable_cleanup_closed=True,
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=100, ttl_dns_cache=300, enable_cleanup_closed=True,
                                         force_close=True)
 
         node_counter = {"nodes_completed": 0}
@@ -669,7 +681,7 @@ class ElevationMapper:
         )
 
         process_run_time = time.perf_counter() - process_start_time
-        logging.info(f"Successfully added grades to edges in {process_run_time:.2f} seconds")
+        logging.info(f"Successfully added grades to edges in {turn_seconds_into_minutes(process_run_time)}")
 
 
 ### need to review GeoDatabase and ArcProject classes code to make sure no errors
@@ -696,8 +708,17 @@ class GeoDatabase:
             # go through and make sure that none of the current gdbs will be default
             for gdb_dict in current_gdbs:
                 gdb_dict["isDefaultDatabase"] = False
-            # add geodatabase instance to project and update
-            current_gdbs.append(gdb_dictionary_for_adding)
+
+            # in case the desired gdb is not showing up in the current gdbs list
+            if self.gdb_path not in [gdb_dict["databasePath"] for gdb_dict in current_gdbs]:
+                current_gdbs.append(gdb_dictionary_for_adding)
+
+            # now can safely set the geodatabase for this call as default
+            for gdb_dict in current_gdbs:
+                if gdb_dict["databasePath"] == self.gdb_path:
+                    gdb_dict["isDefaultDatabase"] = True
+
+            # now update project
             self.project.arcObject.updateDatabases(current_gdbs)
 
             # housekeeping
@@ -714,17 +735,32 @@ class GeoDatabase:
             raise FileNotFoundError(f"Cannot set up geodatabase in the the provided project {self.project.name}"
                                     f"because it doesn't exist")
 
+        # in case where gdb does not exist and reset is not desired
         if not reset and not arcpy.Exists(self.gdb_path):
             logging.info("No existing geodatabase found, creating new geodatabase")
             arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
 
-        elif arcpy.Exists(self.gdb_path):
-            arcpy.Delete_management(self.gdb_path)
-            arcpy.overwriteOutput = True
+        # in case where gdb does not exist but reset is desired (erroneously)
+        elif not arcpy.Exists(self.gdb_path) and reset:
+            logging.warning(f"No geodatabase with the name {self.gdb_name} exists, but you indicated you would like to"
+                            f"reset. If this was a mistake, stop the script (in case other stuff gets reset).")
+            logging.info("No existing geodatabase found, creating new geodatabase")
             arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
 
-        else:
+        # in case where gdb exists and reset is desired
+        elif arcpy.Exists(self.gdb_path):
+            logging.info("Existing geodatabase found, deleting and creating new geodatabase")
+
+            # need to delete using Arc...
+            arcpy.env.overwriteOutput = True
+            arcpy.Delete_management(self.gdb_path)
+
+            # then create
             arcpy.management.CreateFileGDB(self.project.project_dir_path, self.gdb_name)
+
+        # in case where gdb exists and reset is not desired
+        else:
+            raise Exception(f"A GeoDatabase {self.gdb_name} already exists but reset desire was not indicated")
 
         # modifying current arcpy env
         arcpy.env.workspace = self.gdb_path
@@ -732,6 +768,8 @@ class GeoDatabase:
         self.project.arcObject.defaultGeodatabase = self.gdb_path
         # save project to make sure that default gdb actually gets set
         self.save_gdb()
+        current_gdbs = self.project.arcObject.databases
+        debuggggg_me = True
 
 class FeatureDataset:  # add scenario_id so can do multiple scenarios of same network type
     """
@@ -775,8 +813,7 @@ class FeatureDataset:  # add scenario_id so can do multiple scenarios of same ne
             arcpy.Delete_management(self.path)
         # creating feature dataset
         arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.name,
-                                              spatial_reference=arcpy.SpatialReference(4326)
-                                              )
+                                              spatial_reference=arcpy.SpatialReference(4326))
         logging.info("Feature dataset successfully created")
 
     def reset_feature_dataset(self):
@@ -786,8 +823,7 @@ class FeatureDataset:  # add scenario_id so can do multiple scenarios of same ne
         else:
             arcpy.Delete_management(self.path)
             arcpy.management.CreateFeatureDataset(self.gdb.gdb_path, self.name,
-                                                  spatial_reference=arcpy.SpatialReference(4326)
-                                                  )
+                                                  spatial_reference=arcpy.SpatialReference(4326))
 
 
 class StreetFeatureClasses:
@@ -849,9 +885,20 @@ class StreetFeatureClasses:
                 logging.warning("Input gdf has no grade column, will calculate flat ground walk times")
                 calculate_flat_ground_walk_time(edges_gdf)
             else:
-                # Tobler's hiking function first along and then against
-                edges_gdf["walk_time_graded_FT"] = (100 * math.exp(-3.5 * abs(edges_gdf["grade"] / 100 + 0.05)))
-                edges_gdf["walk_time_graded_TF"] = (100 * math.exp(-3.5 * abs((-(edges_gdf["grade"])) / 100 + 0.05)))
+                # Am using Tobler's hiking function here (see wikipedia). FT represents "from-to" or along for a given
+                # edge, and TF represents "to-from" or against for a given edge.
+
+                # first calculate speed for along
+                speed_FT_km_per_hour = 6 * (np.exp(-3.5 * np.abs((edges_gdf["grade"]/100) + 0.05)))
+                speed_FT_m_per_min = (speed_FT_km_per_hour * 1000) / 60
+
+                # now calculate speed for against
+                speed_TF_km_per_hour = 6 * (np.exp(-3.5 * np.abs((-(edges_gdf["grade"]/100)) + 0.05)))
+                speed_TF_m_per_min = (speed_TF_km_per_hour * 1000) / 60
+
+                # now  graded walk times for edges are just equal to the length divided by the respective speeds above
+                edges_gdf["walk_time_graded_FT"] = edges_gdf["length"] / speed_FT_m_per_min
+                edges_gdf["walk_time_graded_TF"] = edges_gdf["length"] / speed_TF_m_per_min
 
         # now can calculate walk times
         if self.use_elevation:
@@ -872,13 +919,13 @@ class StreetFeatureClasses:
         os.makedirs(os.path.dirname(nodes_geojson_path), exist_ok=True)
         os.makedirs(os.path.dirname(edges_geojson_path), exist_ok=True)
 
-        # write the gdfs to shapefiles
+        # write the gdfs to geojsons
         self.nodes.to_file(nodes_geojson_path, driver="GeoJSON")
         self.edges.to_file(edges_geojson_path, driver="GeoJSON")
 
         # housekeeping
         process_run_time = time.perf_counter() - process_start_time
-        logging.info(f"Finished converting geodataframes to GeoJSONs in {process_run_time} seconds")
+        logging.info(f"Finished converting geodataframes to GeoJSONs in {turn_seconds_into_minutes(process_run_time)}")
 
         return nodes_geojson_path, edges_geojson_path
 
@@ -909,7 +956,7 @@ class StreetFeatureClasses:
 
         # housekeeping
         process_run_time = time.perf_counter() - process_start_time
-        logging.info(f"Finished converting GeoJSONs to geodatabase feature classes in {process_run_time} seconds")
+        logging.info(f"Finished converting GeoJSONs to geodatabase feature classes in {turn_seconds_into_minutes(process_run_time)}")
 
         ### MIGHT WANT TO ADD BIT HERE TO DELETE THE geojsons? ###
 
@@ -924,7 +971,7 @@ class StreetFeatureClasses:
         edges_geojson_path = os.path.join(self.cache_folder.path, "edges_fc.geojson")
 
         # in case where cached data exists
-        if os.path.exists(nodes_geojson_path) and os.path.exists(edges_geojson_path):
+        if os.path.exists(nodes_geojson_path) and os.path.exists(edges_geojson_path) and not self.reset:
 
             logging.info("Cached GeoJSONs found, converting to feature classes")
             process_start_time = time.perf_counter()
@@ -935,11 +982,10 @@ class StreetFeatureClasses:
 
             # housekeeping
             process_run_time = time.perf_counter() - process_start_time
-            logging.info(f"Mapped the street network to feature classes in {process_run_time} seconds")
+            logging.info(f"Mapped the street network to feature classes in {turn_seconds_into_minutes(process_run_time)}")
 
         else:
             logging.info("Cached data not available, mapping street network to feature classes")
-            logging.info("")
             process_start_time = time.perf_counter()
             # first, calculate walk times while still a dataframe
             self.calculate_walk_times()
@@ -950,7 +996,7 @@ class StreetFeatureClasses:
 
             # housekeeping
             process_run_time = time.perf_counter() - process_start_time
-            logging.info(f"Mapped the street network to feature classes in {process_run_time} seconds")
+            logging.info(f"Mapped the street network to feature classes in {turn_seconds_into_minutes(process_run_time)}")
 
 
 class TransitNetwork:
@@ -960,7 +1006,7 @@ class TransitNetwork:
         Transit network class for place
         
         Attributes:
-            geographic_scope: GeographicScope | geographic scope of the transit network {"city", "msa", "csa"}
+            geographic_scope: GeographicScope | geographic scope of the transit network {"place_only", "msa", "csa"}
             feature_dataset: FeatureDataset | feature dataset where the transit network will be created
             reference_place_list: list[ReferencePlace] | list of reference places for the transit network
             modes: list | modes to be included in the transit network {"all", "bus", "heavy_rail", "light_rail",
@@ -1329,12 +1375,11 @@ class NetworkDataset:
         if network_analyst_extension_checked_out:
             check_network_analyst_extension_back_in()
         process_run_time = time.perf_counter() - process_start_time
-        logging.info(f"Network dataset successfully built in {process_run_time} second")
+        logging.info(f"Network dataset successfully built in {turn_seconds_into_minutes(process_run_time)}")
 
         # save the gdb?
         self.feature_dataset.gdb.save_gdb()
         return self.path
-
 
 # makig sure that network analyst extension is checked back in after done running
 if network_analyst_extension_checked_out:
