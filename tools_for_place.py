@@ -3,6 +3,7 @@ This module exists to take all the various tools already created in the create_n
 organize them into a class that can be used to create network datasets from OSM street network data. Also used
 to get transit data for a place and use that to create a transit network dataset.
 """
+from Geoenrichment import travel_mode
 
 # yes I know it's bad practice to use import * but in this case, I've made sure that it won't cause any problems
 # (can safely map namespace of create_network_dataset_oop to this module because were developed in tandem)
@@ -196,14 +197,14 @@ class Place:
 
         # elevation handling for street network
         if not use_elevation:
-            street_network_for_place.get_street_network_from_osm()
+            street_network_for_place.get_street_network_from_osm(reset=full_reset)
             # take street network map to feature classes
             street_feature_classes_for_place = StreetFeatureClasses(feature_dataset_for_place, street_network_for_place,
                                                                     use_elevation=False,
                                                                     reset=full_reset)
         else:
             # using elevation
-            street_network_for_place.get_street_network_from_osm()
+            street_network_for_place.get_street_network_from_osm(reset=full_reset)
 
             # create new ElevationMapper object for this street network and then getting elevations and nodes
             elevation_mapper_for_place = ElevationMapper(street_network=street_network_for_place,reset=elevation_reset)
@@ -414,7 +415,7 @@ class Place:
                                           fc_name=f"{self.snake_name}_test_points", point_coordinates=input_point_coordinates)
 
         # set travel mode
-        travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
+        _travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
                                                                                                 "isochrone_travel_mode"]
 
         # set analysis_time to analyze
@@ -440,7 +441,7 @@ class Place:
         check_out_network_analyst_extension()
         logging.info("Creating service area analysis layer")
         result_object = arcpy.na.MakeServiceAreaAnalysisLayer(network_data_source=network_dataset_path,
-                                                              layer_name=isochrone_name, travel_mode=travel_mode,
+                                                              layer_name=isochrone_name, travel_mode=_travel_mode,
                                                               travel_direction=travel_direction, # gives warning because expects literal but fine
                                                               time_of_day=time_to_analyze, cutoffs=cutoffs_minutes,
                                                               geometry_at_overlaps="DISSOLVE")
@@ -522,18 +523,162 @@ class Place:
         pass
 
     # important!! method that generates origin-destination cost matrix
-    def generate_od_cost_matrix(self):
-        pass
+    def generate_od_cost_matrix(self, matrix_name:str=None, origins_fc_name:str=None,
+                                destinations_fc_name:str=None, network_type:str="transit",
+                                use_elevation:bool=False, day_of_week:str="Today", analysis_date:str=None,
+                                analysis_time:str="9:00 AM", open_on_complete:bool=False,
+                                reset_network_dataset:bool=False):
+        """
+        :param matrix_name: (str) the name for the od-cost matrix that will be generated
+        :param origins_fc_name: (str) the name of the feature class containing the points to be used as origins in
+            generating the matrix. Note that name should be relative path and feature class must be points!
+        :param destinations_fc_name: (str) the name of the feature class containing the points to be used as destinations
+            in generating the matrix. Note that name should be relative path and feature class must be points!
+        :param network_type: (str) the type of network to be used for the matrix
+        :param use_elevation: (bool) if True, will try to use an elevation enabled network dataset
+        :param day_of_week: (str)
+        :param analysis_date:
+        :param analysis_time:
+        :param open_on_complete:
+        :param reset_network_dataset:
+        :return:
+        """
+        # set the environment/workspace
+        arcpy.env.workspace = self.gdb_path
+        arcpy.env.overwriteOutput = True
+
+        # first, lots of type checking of course
+        if not isinstance(matrix_name, str) and matrix_name is not None:
+            raise Exception("Matrix name must be a string or left alone")
+
+        if not isinstance(origins_fc_name, str) and origins_fc_name is not None:
+            raise Exception("The name for the feature class to be used for the origins must be a string")
+
+        # also check that necessary parameters passed
+        if origins_fc_name is None or destinations_fc_name is None:
+            raise Exception("Must provide the names of both the origins and destinations feature classes")
+
+        # set matrix name if none provided
+        if matrix_name is None:
+            matrix_name = generate_random_base64_value(100000000)
+
+        # now check whether network dataset of corresponding type already exists
+        if use_elevation:
+            using_elevation_tag = "z"
+        else:
+            using_elevation_tag = "no_z"
+        feature_dataset_would_be_named = f"{network_type}_{using_elevation_tag}_{self.scenario_id}_fd"
+        network_dataset_path = os.path.join(self.gdb_path, feature_dataset_would_be_named,
+                                            f"{network_type}_{using_elevation_tag}_nd")
+
+        # check that 1) network dataset exists and 2) reset_network_dataset is False (no ND reset desired)
+        if arcpy.Exists(network_dataset_path) and not reset_network_dataset:
+            logging.info(f"Using existing network dataset {network_type}_{using_elevation_tag}")
+            pass
+        # in case no matching network dataset could be found or reset desired
+        else:
+            logging.info(f"No network dataset found. Creating {network_type}_{using_elevation_tag}")
+            # passing the reset_network_dataset parameter to the create_network_dataset_from_place method just in case
+            self.create_network_dataset_from_place(network_type=network_type, use_elevation=use_elevation,
+                                                   full_reset=reset_network_dataset,
+                                                   elevation_reset=reset_network_dataset)
+
+
+        # set travel mode for the analysis
+        _analysis_travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
+            "isochrone_travel_mode"]
+
+        # set analysis_time to analyze
+        if analysis_date is None:
+            # use ArcGIS magic dates for day of week
+            day_map = {
+                "Today": "12/30/1899",
+                "Sunday": "12/31/1899",
+                "Monday": "1/1/1900",
+                "Tuesday": "1/2/1900",
+                "Wednesday": "1/3/1900",
+                "Thursday": "1/4/1900",
+                "Friday": "1/5/1900",
+                "Saturday": "1/6/1900"
+            }
+            time_to_analyze = f"{day_map[day_of_week]} {analysis_time}"
+        else:
+            time_to_analyze = f"{analysis_date} {analysis_time}"
+
+        # generate the actual cost matrix layer
+        check_out_network_analyst_extension()
+        logging.info("Creating OD Cost Matrix Analysis Layer")
+        result_object = arcpy.na.MakeODCostMatrixAnalysisLayer(network_data_source=network_dataset_path,
+                                                               layer_name=matrix_name, travel_mode=_analysis_travel_mode,
+                                                               cutoff=None,
+                                                               time_of_day=time_to_analyze,
+                                                               time_zone="LOCAL_TIME_AT_LOCATIONS",
+                                                               line_shape="NO_LINES")
+
+        # get layer object out
+        layer_object = result_object.getOutput(0)
+
+        # get the names of the sublayers
+        sublayer_names = arcpy.na.GetNAClassNames(layer_object)
+        origins_layer_name = sublayer_names["Origins"]
+        destination_layer_name = sublayer_names["Destinations"]
+
+        # now need to add locations for origins and destinations
+        logging.info("Adding origins to the matrix layer")
+        arcpy.na.AddLocations(in_network_analysis_layer=layer_object, sub_layer=origins_layer_name,
+                              in_table=origins_fc_name, search_tolerance="10000 Meters")
+        logging.info("Adding destinations to the matrix layer")
+        arcpy.na.AddLocations(in_network_analysis_layer=layer_object, sub_layer=destination_layer_name,
+                              in_table=destinations_fc_name, search_tolerance="10000 Meters")
+
+        # now can solve the layer
+        logging.info("Solving the OD Cost Matrix")
+        arcpy.na.Solve(layer_object)
+
+        # the path where will save a copy of the layer file
+        output_layer_file = os.path.join(self.cache_folder.path, "od_cost_matrices", f"{network_type}",
+                                         f"{matrix_name}.lyrx")
+        # make directories in case don't exist yet
+        os.makedirs(os.path.dirname(output_layer_file), exist_ok=True)
+        # now can save
+        logging.info(f"Saving a copy of the OD cost matrix to {output_layer_file}")
+        layer_object.saveACopy(output_layer_file)
+
+        logging.info(f"Successfully solved matrix {matrix_name} for {self.main_reference_place.pretty_name} "
+                     f"{self.geographic_scope} {analysis_time} {day_of_week}")
+
+        # setting up the maps for the project
+        logging.info("Adding OD Cost Matrix layer to map")
+        maps = self.arcgis_project.arcObject.listMaps("Map")
+        if not maps:
+            self.arcgis_project.arcObject.createMap("Map")
+            self.arcgis_project.arcObject.save()
+            maps = self.arcgis_project.arcObject.listMaps("Map")
+
+        # add the layer to the map
+        aprxMap = maps[0]
+        # now make LayerFile Object and add to map
+        od_matrix_layer_file = arcpy.mp.LayerFile(output_layer_file)
+        aprxMap.addDataFromPath(od_matrix_layer_file)
+
+
+
 
 
 
 # # # # # # # # # # # # # # # # # # Testing Area :::: DO NOT REMOVE "if __name__ ..." # # # # # # # # # # # # # # # # #
 
 if __name__ == "__main__":
-    arc_package_project = ArcProject("code_demonstration")
-    Berkeley = Place(arc_package_project, place_name="Chicago, Illinois, USA", geographic_scope="place_only",
-                       scenario_id="chicago_timing")
-    Berkeley.create_network_dataset_from_place(network_type="walk", use_elevation=False)
+    arc_package_project = ArcProject("upp_461_final")
+    Berkeley = Place(arc_package_project, place_name="Chicago, Illinois, USA", geographic_scope="csa",
+                       scenario_id="AM_Peak")
+    Berkeley.generate_od_cost_matrix(matrix_name="AM_Peak", origins_fc_name="taz_centroids_",
+                                     destinations_fc_name="taz_centroids_", network_type="transit", use_elevation=False)
+
+
+
+
+
 
     ### NOTE FOR DEBUGGING/FIXING CODE::::
     """

@@ -1001,7 +1001,7 @@ class StreetFeatureClasses:
 
 class TransitNetwork:
     def __init__(self, geographic_scope, feature_dataset: FeatureDataset, reference_place_list: list[ReferencePlace],
-                 modes: list = None, agencies_to_include:list[TransitAgency]=None):
+                 modes: list = None, agencies_to_include:list[TransitAgency]=None, own_gtfs_data_paths:list[str]=None):
         """
         Transit network class for place
         
@@ -1044,6 +1044,12 @@ class TransitNetwork:
             logging.info("a list of transit agencies to include was not specified so all agencies that serve the place"
                          " will be used")
             self.agencies_to_include = self.get_agencies_for_place()
+
+        # adding the ability to bring your own gtfs data
+        self.own_gtfs_data_paths = own_gtfs_data_paths
+        if self.own_gtfs_data_paths is None:
+            logging.info(f"Own GTFS data not provided, will query TransitLand API to get transit agencies that serve"
+                         f"{self.main_reference_place.pretty_name}")
 
         # once the first three methods have been run (get_agencies_for_place, get_gtfs_for_transit_agencies,
         # unzip_gtfs_data), this dictionary will contain the paths of unzipped gtfs data available for place
@@ -1269,7 +1275,7 @@ class NetworkDataset:
         reset (bool): Whether to reset the network dataset. Default is False.
         street_network (str): The path to the street network feature class.
         name (str): The name of the network dataset. By default will be the network type with "_nd" appended.
-        path (str): The path to the network dataset (always C:\...\<feature_dataset_name>\<network_dataset_name>.nd)
+        path (str): The path to the network dataset (always C:\\...\\<feature_dataset_name>\\<network_dataset_name>.nd)
 
     """
 
