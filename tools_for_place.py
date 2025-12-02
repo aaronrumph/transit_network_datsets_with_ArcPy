@@ -19,10 +19,11 @@ import os
 
 
 # logging setup
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 # don't want to display debugging messages when running this script
 logging.getLogger("requests").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
+logging.getLogger("general_tools").setLevel(logging.INFO)
 
 # set up arcpy environment
 arcpy_config.set_up_arcpy_env()
@@ -523,6 +524,7 @@ class Place:
         pass
 
     # important!! method that generates origin-destination cost matrix
+    @time_function
     def generate_od_cost_matrix(self, matrix_name:str=None, origins_fc_name:str=None,
                                 destinations_fc_name:str=None, network_type:str="transit",
                                 use_elevation:bool=False, day_of_week:str="Today", analysis_date:str=None,
@@ -661,6 +663,143 @@ class Place:
         od_matrix_layer_file = arcpy.mp.LayerFile(output_layer_file)
         aprxMap.addDataFromPath(od_matrix_layer_file)
 
+    @time_function
+    def generate_large_od_cost_matrix(self, matrix_name:str=None, origins_fc_path:str=None,
+                                      destinations_fc_path:str=None, network_type:str= "transit",
+                                      use_elevation:bool=False, day_of_week:str="Today", analysis_date:str=None,
+                                      analysis_time:str="9:00 AM", open_on_complete:bool=False,
+                                      reset_network_dataset:bool=False, number_of_threads:int=None,
+                                      max_inputs_per_chunk:int=None):
+        """
+        This method is intended for generating OD cost matrices for extremely large networks/datasets. Compared with
+        the standard generate_od_cost_matrix method it should be faster as it uses multiprocessing, breaking
+        the problem into smaller chunks and then calculating each at the same time. Uses the SolveLargeODCostMatrix
+        tool published by Esri. See more:
+        https://github.com/Esri/large-network-analysis-tools?tab=readme-ov-file#Solve-Large-OD-Cost-Matrix-tool.
+
+        :param matrix_name:
+        :param origins_fc_path:
+        :param destinations_fc_path:
+        :param network_type:
+        :param use_elevation:
+        :param day_of_week:
+        :param analysis_date:
+        :param analysis_time:
+        :param open_on_complete:
+        :param reset_network_dataset:
+        :param number_of_threads:
+        :param max_inputs_per_chunk:
+        :return:
+        """
+        logging.info("Generating OD Cost Matrix")
+
+        # setup environment
+        arcpy.env.workspace = self.gdb_path
+        arcpy.env.overwriteOutput = True
+
+        # add type checking here
+
+        # need to import the toolbox published by Esri
+        logging.info("Importing LargeNetworkAnalysisTools toolbox to arcpy")
+        path_to_toolbox = os.path.join(Path(__file__).parent, "large_network_analysis_tools",
+                                       "LargeNetworkAnalysisTools.pyt")
+        arcpy.ImportToolbox(path_to_toolbox)
+        logging.info("Successfully imported toolbox")
+
+        # now the rest of setup necessary before can use the tool
+        logging.info("Preparing necessary data to generate the matrix")
+
+        # set matrix name if none provided
+        if matrix_name is None:
+            matrix_name = (f"{analysis_date}_{day_of_week}_{analysis_time}_od_matrix")
+
+        # now check whether network dataset of corresponding type already exists
+        if use_elevation:
+            using_elevation_tag = "z"
+        else:
+            using_elevation_tag = "no_z"
+        feature_dataset_would_be_named = f"{network_type}_{using_elevation_tag}_{self.scenario_id}_fd"
+        network_dataset_path = os.path.join(self.gdb_path, feature_dataset_would_be_named,
+                                            f"{network_type}_{using_elevation_tag}_nd")
+
+        # check that 1) network dataset exists and 2) reset_network_dataset is False (no ND reset desired)
+        if arcpy.Exists(network_dataset_path) and not reset_network_dataset:
+            logging.info(f"Using existing network dataset {network_type}_{using_elevation_tag}")
+            pass
+        # in case no matching network dataset could be found or reset desired
+        else:
+            # want to check to make sure before creating new network dataset just in case (because assuming nd is big)
+            are_you_sure_this_is_right_q = input(f"No network dataset {network_type}_{using_elevation_tag} was found"
+                                                 f"for {self.main_reference_place.pretty_name} {self.geographic_scope}."
+                                                 f"If there is one it will be reset. "
+                                                 f"Enter 'Yes' or 'Y' if you'd like to continue or 'No' or 'N' if not")
+            if are_you_sure_this_is_right_q == "Yes" or are_you_sure_this_is_right_q == "Y":
+                logging.info(f"Creating {network_type}_{using_elevation_tag}")
+                # passing the reset_network_dataset parameter to the create_network_dataset_from_place method just in case
+                self.create_network_dataset_from_place(network_type=network_type, use_elevation=use_elevation,
+                                                       full_reset=reset_network_dataset,
+                                                       elevation_reset=reset_network_dataset)
+
+        # set travel mode for the analysis
+        _analysis_travel_mode = network_types.network_types_attributes[f"{network_type}_{using_elevation_tag}"][
+            "isochrone_travel_mode"]
+
+        # set analysis_time to analyze
+        if analysis_date is None:
+            # use ArcGIS magic dates for day of week
+            day_map = {
+                "Today": "12/30/1899",
+                "Sunday": "12/31/1899",
+                "Monday": "1/1/1900",
+                "Tuesday": "1/2/1900",
+                "Wednesday": "1/3/1900",
+                "Thursday": "1/4/1900",
+                "Friday": "1/5/1900",
+                "Saturday": "1/6/1900"
+            }
+            time_to_analyze = f"{day_map[day_of_week]} {analysis_time}"
+        else:
+            time_to_analyze = f"{analysis_date} {analysis_time}"
+
+        # set the number of inputs per chunk and max processes based on number of cores and number of features
+        num_cores = os.cpu_count() - 1  # includes hyperthreading, minus 1 to be safe
+
+        # count the features for origins
+        origins_count_result_object = arcpy.GetCount_management(origins_fc_path)
+        origins_feature_count = int(origins_count_result_object.getOutput(0))
+
+        # count the features for destinations
+        destinations_count_result_object = arcpy.GetCount_management(destinations_fc_path)
+        destinations_feature_count = int(destinations_count_result_object.getOutput(0))
+
+        # setting max chuck size to 1000
+        num_feature_per_chunk = 1000
+
+        # IMPORTANT: outputting to csvs because faster, this is path where csvs will be made
+        csv_output_folder_path = os.path.join(self.cache_folder.path, "large_oc_cost_matrix_csvs", network_type,
+                                              matrix_name)
+        # make sure that necessary dirs exist NOTE: if folder already exists will cause problems, so only parent dirs
+        csv_output_folder_parent_dir = os.path.dirname(csv_output_folder_path)
+        os.makedirs(csv_output_folder_parent_dir, exist_ok=True)
+
+        # check out the network analyst extension (just in case)
+        check_out_network_analyst_extension()
+
+        # now have access to the LargeNetworkAnalysisTools module, next basically same as generate_od_cost_matrix
+        arcpy.LargeNetworkAnalysisTools.SolveLargeODCostMatrix(Origins=origins_fc_path,
+                                                               Destinations=destinations_fc_path,
+                                                               Network_Data_Source=network_dataset_path,
+                                                               Travel_Mode=_analysis_travel_mode,
+                                                               Time_Units="Minutes",
+                                                               Distance_Units="Meters",
+                                                               Max_Inputs_Per_Chunk=num_feature_per_chunk,
+                                                               Max_Processes=num_cores,
+                                                               Output_Format="CSV files",
+                                                               Output_Folder=csv_output_folder_path,
+                                                               Time_Of_Day=analysis_time)
+
+        logging.info(f"Successfully solved large OD cost matrix {matrix_name} for "
+                     f"{self.main_reference_place.pretty_name} {self.geographic_scope} {analysis_time} {day_of_week}")
 
 
 
@@ -672,8 +811,11 @@ if __name__ == "__main__":
     arc_package_project = ArcProject("upp_461_final")
     Berkeley = Place(arc_package_project, place_name="Chicago, Illinois, USA", geographic_scope="csa",
                        scenario_id="AM_Peak")
-    Berkeley.generate_od_cost_matrix(matrix_name="AM_Peak", origins_fc_name="taz_centroids_",
-                                     destinations_fc_name="taz_centroids_", network_type="transit", use_elevation=False)
+    taz_centroids_path = r"C:\Users\Aaron\PycharmProjects\transit_network_datsets_with_ArcPy\upp_461_final\chicago_illinois_usa_csa.gdb\taz_centroids_"
+    Berkeley.generate_large_od_cost_matrix(matrix_name="PM_Peak", origins_fc_path=taz_centroids_path,
+                                           destinations_fc_path=taz_centroids_path, network_type="transit",
+                                           use_elevation=False, day_of_week="Monday",
+                                           analysis_time="5:00 PM", open_on_complete=True)
 
 
 

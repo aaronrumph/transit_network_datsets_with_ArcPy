@@ -31,6 +31,22 @@ regex_matching_patterns = {
     "latitude":
         r"^[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?)$"}
 
+def time_function(func):
+    """
+    Decorator to time functions
+    :param func:
+    :return:
+    """
+    import time
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        logging.info(f"Function {func.__name__} took {turn_seconds_into_minutes(elapsed_time)} to complete.")
+        return result
+    return wrapper
+
 
 class ReferencePlace:
     def __init__(self, place_name:str=None, bound_box:tuple[str|float, str|float, str|float, str|float]=None):

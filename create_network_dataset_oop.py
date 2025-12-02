@@ -49,7 +49,7 @@ if platform.system() != "Windows":
     raise OSError("Cannot run this module because not using Windows. ArcGIS and ArcPy require Windows")
 
 # logging setup
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 

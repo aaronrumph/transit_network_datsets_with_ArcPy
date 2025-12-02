@@ -108,10 +108,7 @@
                         <PropertySetProperty xsi:type='typens:PropertySetProperty'>
                             <Key>TravelMode0</Key>
                             <Value xsi:type='xs:string'>{&quot;name&quot;:&quot;Public transit time&quot;,&quot;type&quot;:&quot;OTHER&quot;,&quot;description&quot;:&quot;Models\n
-                                a pedestrian walking on streets and taking public transit&quot;,&quot;impedanceAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;timeAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[&quot;PedestrianRestriction&quot;],&quot;attributeParameterValues&quot;:[{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                lines&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                modes&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                runs&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
+                                a pedestrian walking on streets and taking public transit&quot;,&quot;impedanceAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;timeAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[&quot;PedestrianRestriction&quot;],&quot;attributeParameterValues&quot;:[{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
                                 with a bicycle&quot;,&quot;value&quot;:false},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
                                 with a wheelchair&quot;,&quot;value&quot;:false},{&quot;attributeName&quot;:&quot;WalkTime&quot;,&quot;parameterName&quot;:&quot;Walk
                                 speed (meters per minute)&quot;,&quot;value&quot;:83.333299999999994},{&quot;attributeName&quot;:&quot;PedestrianRestriction&quot;,&quot;parameterName&quot;:&quot;Restriction
@@ -122,10 +119,7 @@
                         <PropertySetProperty xsi:type='typens:PropertySetProperty'>
                             <Key>TravelMode1</Key>
                             <Value xsi:type='xs:string'>{&quot;name&quot;:&quot;Public transit time with wheelchair&quot;,&quot;type&quot;:&quot;OTHER&quot;,&quot;description&quot;:&quot;Models\n
-                                a traveler with a wheelchair using streets and public transit&quot;,&quot;impedanceAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;timeAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[&quot;PedestrianRestriction&quot;,&quot;WheelchairRestriction&quot;],&quot;attributeParameterValues&quot;:[{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                lines&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                modes&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Exclude
-                                runs&quot;,&quot;value&quot;:null},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
+                                a traveler with a wheelchair using streets and public transit&quot;,&quot;impedanceAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;timeAttributeName&quot;:&quot;PublicTransitTime&quot;,&quot;distanceAttributeName&quot;:&quot;Length&quot;,&quot;restrictionAttributeNames&quot;:[&quot;PedestrianRestriction&quot;,&quot;WheelchairRestriction&quot;],&quot;attributeParameterValues&quot;:[{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
                                 with a bicycle&quot;,&quot;value&quot;:false},{&quot;attributeName&quot;:&quot;PublicTransitTime&quot;,&quot;parameterName&quot;:&quot;Traveling
                                 with a wheelchair&quot;,&quot;value&quot;:false},{&quot;attributeName&quot;:&quot;WalkTime&quot;,&quot;parameterName&quot;:&quot;Walk
                                 speed (meters per minute)&quot;,&quot;value&quot;:83.333299999999994},{&quot;attributeName&quot;:&quot;PedestrianRestriction&quot;,&quot;parameterName&quot;:&quot;Restriction
@@ -367,27 +361,6 @@
             <UserData xsi:nil='true'/>
             <UseByDefault>true</UseByDefault>
             <AttributeParameters xsi:type='typens:ArrayOfNetworkAttributeParameter'>
-                <NetworkAttributeParameter xsi:type='typens:NetworkAttributeParameter'>
-                    <Name>Exclude lines</Name>
-                    <VarType>8</VarType>
-                    <Value xsi:nil='true'/>
-                    <DefaultValue xsi:nil='true'/>
-                    <ParameterUsageType>esriNAPUTGeneral</ParameterUsageType>
-                </NetworkAttributeParameter>
-                <NetworkAttributeParameter xsi:type='typens:NetworkAttributeParameter'>
-                    <Name>Exclude modes</Name>
-                    <VarType>8</VarType>
-                    <Value xsi:nil='true'/>
-                    <DefaultValue xsi:nil='true'/>
-                    <ParameterUsageType>esriNAPUTGeneral</ParameterUsageType>
-                </NetworkAttributeParameter>
-                <NetworkAttributeParameter xsi:type='typens:NetworkAttributeParameter'>
-                    <Name>Exclude runs</Name>
-                    <VarType>8</VarType>
-                    <Value xsi:nil='true'/>
-                    <DefaultValue xsi:nil='true'/>
-                    <ParameterUsageType>esriNAPUTGeneral</ParameterUsageType>
-                </NetworkAttributeParameter>
                 <NetworkAttributeParameter xsi:type='typens:NetworkAttributeParameter'>
                     <Name>Traveling with a bicycle</Name>
                     <VarType>11</VarType>
